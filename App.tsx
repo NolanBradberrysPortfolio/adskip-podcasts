@@ -569,7 +569,7 @@ export default function App() {
             </View>
           </View>
 
-          <View style={styles.feedBar}>
+          <View style={[styles.feedBar, !isWide && styles.feedBarCompact]}>
             <TextInput
               value={feedUrl}
               onChangeText={setFeedUrl}
@@ -580,9 +580,16 @@ export default function App() {
               placeholder="https://example.com/feed.xml"
               placeholderTextColor="#5F6B63"
               onSubmitEditing={addFeed}
-              style={styles.feedInput}
+              style={[styles.feedInput, !isWide && styles.feedInputCompact]}
             />
-            <IconButton icon={Plus} label="Add feed" onPress={addFeed} disabled={serverControlsDisabled || !feedUrl.trim()} variant="primary" />
+            <IconButton
+              icon={Plus}
+              label="Add feed"
+              onPress={addFeed}
+              disabled={serverControlsDisabled || !feedUrl.trim()}
+              variant="primary"
+              style={!isWide ? styles.feedAddButtonCompact : undefined}
+            />
           </View>
 
           <View style={[styles.workspace, isWide && styles.workspaceWide]}>
@@ -985,6 +992,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexWrap: 'wrap',
   },
+  feedBarCompact: {
+    alignItems: 'stretch',
+  },
   feedInput: {
     flex: 1,
     minWidth: 0,
@@ -993,6 +1003,12 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     paddingHorizontal: 12,
+  },
+  feedInputCompact: {
+    width: '100%',
+  },
+  feedAddButtonCompact: {
+    width: '100%',
   },
   workspace: {
     gap: 14,

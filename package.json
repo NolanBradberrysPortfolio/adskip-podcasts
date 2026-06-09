@@ -1,0 +1,49 @@
+{
+  "name": "adskip-podcasts",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-community/slider": "5.2.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "expo": "~56.0.9",
+    "expo-asset": "~56.0.16",
+    "expo-audio": "~56.0.11",
+    "expo-splash-screen": "~56.0.10",
+    "expo-status-bar": "~56.0.4",
+    "expo-system-ui": "~56.0.5",
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.8.0",
+    "ipaddr.js": "^1.9.1",
+    "lucide-react-native": "^1.17.0",
+    "openai": "^6.42.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "15.15.4",
+    "react-native-web": "^0.21.2",
+    "rss-parser": "^3.13.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.2",
+    "@types/react": "~19.2.2",
+    "concurrently": "^10.0.3",
+    "tsx": "^4.22.4",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "dev": "concurrently \"npm:server\" \"npm:web\"",
+    "server": "tsx watch server/index.ts",
+    "server:start": "tsx server/index.ts",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}

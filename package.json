@@ -43,7 +43,9 @@
     "server:start": "tsx server/index.ts",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "export:web": "expo export --platform web --clear",
+    "export:pages": "npm run export:web && node scripts/prepare-github-pages.mjs"
   },
   "private": true
 }

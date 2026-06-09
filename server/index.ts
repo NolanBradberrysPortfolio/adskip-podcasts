@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import cors from 'cors';
 import express from 'express';
 import Parser from 'rss-parser';
 import OpenAI from 'openai';
@@ -46,8 +45,11 @@ const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin: string) => origin.trim())
   .filter(Boolean);
+const GITHUB_PAGES_ORIGIN = 'https://nolanbradberrysportfolio.github.io';
+const LOCAL_DEV_ORIGINS = ['http://localhost:8081', 'http://127.0.0.1:8081'];
 const HAS_EXPLICIT_CORS = CORS_ORIGINS.length > 0;
-const ALLOW_PERMISSIVE_CORS = !HAS_EXPLICIT_CORS && (!HAS_OPENAI_KEY || ALLOW_ANY_CORS_ORIGIN);
+const ALLOW_PERMISSIVE_CORS = !HAS_EXPLICIT_CORS && ALLOW_ANY_CORS_ORIGIN;
+const ALLOWED_CORS_ORIGINS = [...CORS_ORIGINS, GITHUB_PAGES_ORIGIN, ...LOCAL_DEV_ORIGINS];
 
 if (IS_PRODUCTION && !HAS_EXPLICIT_CORS) {
   throw new Error('CORS_ORIGINS must be set in production.');
@@ -175,18 +177,7 @@ const opmlSchema = z.object({
 });
 
 const app = express();
-app.use(
-  cors({
-    origin(origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
-      if (!origin || CORS_ORIGINS.includes(origin) || ALLOW_PERMISSIVE_CORS) {
-        callback(null, true);
-        return;
-      }
-
-      callback(null, false);
-    },
-  }),
-);
+app.use(applyCors);
 app.use(rateLimit);
 app.use(express.json({ limit: '2mb' }));
 
@@ -308,6 +299,24 @@ const analyzeRateBuckets = new Map<string, RateBucket>();
 let nextRateLimitPruneAt = Date.now() + RATE_LIMIT_WINDOW_MS;
 let nextAnalyzeRateLimitPruneAt = Date.now() + ANALYZE_RATE_LIMIT_WINDOW_MS;
 let activeAnalyses = 0;
+
+function applyCors(request: express.Request, response: express.Response, next: express.NextFunction): void {
+  const origin = request.header('origin');
+
+  if (origin && (ALLOWED_CORS_ORIGINS.includes(origin) || ALLOW_PERMISSIVE_CORS)) {
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-skipcast-token');
+    response.setHeader('Vary', 'Origin');
+  }
+
+  if (request.method === 'OPTIONS') {
+    response.sendStatus(origin && !response.hasHeader('Access-Control-Allow-Origin') ? 403 : 204);
+    return;
+  }
+
+  next();
+}
 
 function rateLimit(request: express.Request, response: express.Response, next: express.NextFunction): void {
   const now = Date.now();

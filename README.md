@@ -32,6 +32,36 @@ $env:EXPO_PUBLIC_API_URL="http://192.168.1.25:4300"; npm run android
 - `npm run android` starts Expo for Android.
 - `npm run server:start` starts only the RSS/analyzer API.
 
+## Phone Web Demo
+
+The public web app is deployed to GitHub Pages:
+
+```text
+https://nolanbradberrysportfolio.github.io/adskip-podcasts/
+```
+
+GitHub Pages is static, so RSS features need the local API exposed through HTTPS. For a temporary phone demo, keep this computer awake and run:
+
+```powershell
+$env:CORS_ORIGINS="https://nolanbradberrysportfolio.github.io"
+$env:OPENAI_API_KEY=""
+npm run server:start
+```
+
+In another PowerShell window:
+
+```powershell
+.\tools\cloudflared-386.exe tunnel --url http://localhost:4300 --no-autoupdate
+```
+
+Copy the printed `https://...trycloudflare.com` URL, then redeploy Pages with:
+
+```powershell
+gh workflow run pages.yml --repo NolanBradberrysPortfolio/adskip-podcasts --ref main --field api_url="https://YOUR-TUNNEL.trycloudflare.com"
+```
+
+This tunnel setup is for testing. If the tunnel restarts, the backend URL changes and Pages must be redeployed.
+
 ## AI Analysis
 
 If `OPENAI_API_KEY` is set, `/api/analyze` downloads audio files under `MAX_TRANSCRIPTION_AUDIO_MB`, transcribes them with `OPENAI_TRANSCRIBE_MODEL`, and creates skip segments from timestamped transcript cues.

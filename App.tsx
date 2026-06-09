@@ -27,7 +27,7 @@ type FocusableRef = { focus: () => void };
 
 const WIDE_BREAKPOINT = 1120;
 const DESKTOP_EPISODE_PAGE_SIZE = 80;
-const MOBILE_EPISODE_PAGE_SIZE = 25;
+const MOBILE_EPISODE_PAGE_SIZE = 12;
 
 function useModalFocusTrap(visible: boolean, modalTestId: string, initialFocusRef?: RefObject<FocusableRef | null>, restoreFocusSelector?: string) {
   useEffect(() => {
@@ -161,6 +161,7 @@ export default function App() {
   const { width, height } = useWindowDimensions();
   const isWide = width >= WIDE_BREAKPOINT;
   const opmlInputRef = useRef<TextInput>(null);
+  const scrollRef = useRef<ScrollView>(null);
   const [feedUrl, setFeedUrl] = useState('');
   const [feeds, setFeeds] = useState<PodcastFeed[]>([]);
   const [selectedFeedId, setSelectedFeedId] = useState<string>();
@@ -309,14 +310,14 @@ export default function App() {
     apiStatus === 'ready'
       ? 'AI ready'
       : apiStatus === 'ai-offline'
-        ? 'AI offline'
+        ? 'RSS ready'
         : apiStatus === 'checking'
           ? 'Checking API'
           : 'API offline';
   const analysisUnavailableLabel =
-    apiStatus === 'api-offline' ? 'API offline' : apiStatus === 'checking' ? 'Checking API' : 'AI offline';
+    apiStatus === 'api-offline' ? 'API offline' : apiStatus === 'checking' ? 'Checking API' : 'Analysis off';
   const apiPillStyle =
-    apiStatus === 'ready'
+    apiStatus === 'ready' || apiStatus === 'ai-offline'
       ? styles.apiPillReady
       : apiStatus === 'api-offline'
         ? styles.apiPillError
@@ -510,6 +511,17 @@ export default function App() {
 
   const selectEpisode = (episode: PodcastEpisode) => {
     setSelectedEpisodeId(episode.id);
+
+    if (!isWide) {
+      setTimeout(() => {
+        if (Platform.OS === 'web' && typeof document !== 'undefined') {
+          document.querySelector('[data-testid="player-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
+
+        scrollRef.current?.scrollTo({ y: 0, animated: true });
+      }, 50);
+    }
   };
 
   const feedLabel = (feed: PodcastFeed) => `${feed.title}, ${feed.episodes.length} ${feed.episodes.length === 1 ? 'episode' : 'episodes'}`;
@@ -529,7 +541,7 @@ export default function App() {
       <SafeAreaView style={styles.screen}>
         <StatusBar style="dark" />
         <View {...appContentWebProps(modalOpen)} testID="app-content">
-          <ScrollView contentContainerStyle={styles.scrollContent}>
+          <ScrollView ref={scrollRef} contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
             <View style={styles.brandLockup}>
               <View style={styles.logoMark}>
@@ -545,7 +557,7 @@ export default function App() {
               <View style={[styles.apiPill, apiPillStyle]}>
                 {apiStatus === 'checking' ? (
                   <ActivityIndicator color="#5F6B63" />
-                ) : apiStatus === 'ready' ? (
+                ) : apiStatus === 'ready' || apiStatus === 'ai-offline' ? (
                   <CheckCircle2 size={16} color="#0F766E" />
                 ) : (
                   <AlertTriangle size={16} color={apiStatus === 'api-offline' ? '#991B1B' : '#92400E'} />
@@ -614,6 +626,20 @@ export default function App() {
                 ))
               )}
             </View>
+
+            {!isWide && selectedEpisode && (
+              <View testID="player-panel" style={styles.playerColumn}>
+                <PodcastPlayer
+                  episode={selectedEpisode}
+                  segments={selectedSegments}
+                  analyzing={analyzing}
+                  onAnalyze={runAnalysis}
+                  onUndoSkip={handleUndoSkip}
+                  canAnalyze={canAnalyze}
+                  analysisUnavailableLabel={analysisUnavailableLabel}
+                />
+              </View>
+            )}
 
             <View style={[styles.panel, isWide && styles.episodesPanel]}>
             <View style={styles.panelHeader}>
@@ -750,8 +776,8 @@ export default function App() {
             )}
             </View>
 
-            {(isWide || selectedEpisode) && (
-              <View style={[styles.playerColumn, isWide && styles.playerPanel]}>
+            {isWide && (
+              <View testID="player-panel" style={[styles.playerColumn, styles.playerPanel]}>
                 <PodcastPlayer
                   episode={selectedEpisode}
                   segments={selectedSegments}

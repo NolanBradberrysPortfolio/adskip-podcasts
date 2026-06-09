@@ -5,7 +5,6 @@
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-community/slider": "5.2.0",
-    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "expo": "~56.0.9",
     "expo-asset": "~56.0.16",
@@ -28,7 +27,6 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.2",
     "@types/react": "~19.2.2",

@@ -26,16 +26,18 @@ test('GitHub Pages phone web flow can add RSS and reach the player', async ({ pa
   await expect(page.getByRole('button', { name: 'Play' })).toBeVisible();
 
   const metrics = await page.evaluate(() => {
-    const player = document.querySelector('[data-testid="player-panel"]')?.getBoundingClientRect();
+    const playButton = document.querySelector('[aria-label="Play"]')?.getBoundingClientRect();
     return {
       horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-      playerTop: player?.top ?? null,
+      playTop: playButton?.top ?? null,
+      playBottom: playButton?.bottom ?? null,
       viewportHeight: window.innerHeight,
     };
   });
 
   expect(metrics.horizontalOverflow).toBe(false);
-  expect(metrics.playerTop).not.toBeNull();
-  expect(metrics.playerTop!).toBeGreaterThanOrEqual(0);
-  expect(metrics.playerTop!).toBeLessThan(metrics.viewportHeight);
+  expect(metrics.playTop).not.toBeNull();
+  expect(metrics.playBottom).not.toBeNull();
+  expect(metrics.playTop!).toBeGreaterThanOrEqual(0);
+  expect(metrics.playBottom!).toBeLessThanOrEqual(metrics.viewportHeight);
 });

@@ -41,14 +41,19 @@ const webSliderStyle: CSSProperties = {
   width: '100%',
 };
 
-function switchWebProps(checked: boolean, onToggle: () => void): Record<string, unknown> {
+function switchWebProps(checked: boolean, disabled: boolean, onToggle: () => void): Record<string, unknown> {
   if (Platform.OS !== 'web') {
     return {};
   }
 
   return {
     'aria-checked': checked,
+    'aria-disabled': disabled,
     onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (disabled) {
+        return;
+      }
+
       if (event.key === ' ' || event.key === 'Spacebar') {
         event.preventDefault();
         onToggle();
@@ -89,6 +94,8 @@ export function PodcastPlayer({
     preferredForwardBufferDuration: 20,
   });
   const status = useAudioPlayerStatus(player);
+  const hasSkipSegments = segments.length > 0;
+  const effectiveAutoSkip = autoSkip && hasSkipSegments;
 
   useEffect(() => {
     setAudioModeAsync({
@@ -116,7 +123,7 @@ export function PodcastPlayer({
   }, [player, rate]);
 
   useEffect(() => {
-    if (!autoSkip || !isForeground || !episode || !status.playing) {
+    if (!effectiveAutoSkip || !isForeground || !episode || !status.playing) {
       return;
     }
 
@@ -136,7 +143,7 @@ export function PodcastPlayer({
     skippedIds.current.add(segment.id);
     lastSkipped.current = segment;
     player.seekTo(segment.end + 0.2).catch(() => undefined);
-  }, [autoSkip, episode, isForeground, player, segments, status.currentTime, status.playing]);
+  }, [effectiveAutoSkip, episode, isForeground, player, segments, status.currentTime, status.playing]);
 
   const duration = status.duration || episode?.duration || 0;
   const progress = duration ? clamp(status.currentTime / duration, 0, 1) : 0;
@@ -311,25 +318,27 @@ export function PodcastPlayer({
 
       <View style={styles.playerTools}>
         <Pressable
-          {...switchWebProps(autoSkip, toggleAutoSkip)}
+          {...switchWebProps(effectiveAutoSkip, !hasSkipSegments, toggleAutoSkip)}
           accessibilityRole="switch"
           accessibilityLabel="Auto-skip"
-          accessibilityState={{ checked: autoSkip }}
+          accessibilityState={{ checked: effectiveAutoSkip, disabled: !hasSkipSegments }}
+          disabled={!hasSkipSegments}
           onPress={toggleAutoSkip}
-          style={styles.switchRow}
+          style={[styles.switchRow, !hasSkipSegments && styles.switchRowDisabled]}
         >
-          <Text style={styles.toolLabel}>Auto-skip</Text>
+          <Text style={[styles.toolLabel, !hasSkipSegments && styles.toolLabelDisabled]}>Auto-skip</Text>
           {Platform.OS === 'web' ? (
-            <View style={[styles.switchTrack, autoSkip && styles.switchTrackOn]}>
-              <View style={[styles.switchThumb, autoSkip && styles.switchThumbOn]} />
+            <View style={[styles.switchTrack, effectiveAutoSkip && styles.switchTrackOn]}>
+              <View style={[styles.switchThumb, effectiveAutoSkip && styles.switchThumbOn]} />
             </View>
           ) : (
             <View pointerEvents="none" importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
               <Switch
-                value={autoSkip}
+                value={effectiveAutoSkip}
                 onValueChange={setAutoSkip}
+                disabled={!hasSkipSegments}
                 trackColor={{ false: '#D1D5DB', true: '#9BD7CA' }}
-                thumbColor={autoSkip ? '#122620' : '#F8FAF7'}
+                thumbColor={effectiveAutoSkip ? '#122620' : '#F8FAF7'}
               />
             </View>
           )}
@@ -527,6 +536,9 @@ const styles = StyleSheet.create({
     gap: 8,
     backgroundColor: '#EFF2EE',
   },
+  switchRowDisabled: {
+    backgroundColor: '#F3F4F6',
+  },
   switchTrack: {
     width: 42,
     height: 24,
@@ -550,6 +562,9 @@ const styles = StyleSheet.create({
   toolLabel: {
     color: '#122620',
     fontWeight: '800',
+  },
+  toolLabelDisabled: {
+    color: '#6B7280',
   },
   speedRow: {
     flexDirection: 'row',

@@ -26,7 +26,8 @@ type ApiStatus = 'checking' | 'api-offline' | 'ai-offline' | 'ready';
 type FocusableRef = { focus: () => void };
 
 const WIDE_BREAKPOINT = 1120;
-const EPISODE_PREVIEW_LIMIT = 80;
+const DESKTOP_EPISODE_PAGE_SIZE = 80;
+const MOBILE_EPISODE_PAGE_SIZE = 25;
 
 function useModalFocusTrap(visible: boolean, modalTestId: string, initialFocusRef?: RefObject<FocusableRef | null>, restoreFocusSelector?: string) {
   useEffect(() => {
@@ -289,14 +290,15 @@ export default function App() {
 
     return episodes.filter((episode) => episode.title.toLowerCase().includes(query));
   }, [episodeQuery, selectedFeed?.episodes]);
-  const maxEpisodeOffset = Math.max(filteredEpisodes.length - EPISODE_PREVIEW_LIMIT, 0);
+  const episodePageSize = isWide ? DESKTOP_EPISODE_PAGE_SIZE : MOBILE_EPISODE_PAGE_SIZE;
+  const maxEpisodeOffset = Math.max(filteredEpisodes.length - episodePageSize, 0);
   const boundedEpisodeOffset = Math.min(episodeOffset, maxEpisodeOffset);
-  const visibleEpisodes = filteredEpisodes.slice(boundedEpisodeOffset, boundedEpisodeOffset + EPISODE_PREVIEW_LIMIT);
+  const visibleEpisodes = filteredEpisodes.slice(boundedEpisodeOffset, boundedEpisodeOffset + episodePageSize);
   const apiReachable = apiStatus === 'ready' || apiStatus === 'ai-offline';
   const serverControlsDisabled = loadingFeed || !apiReachable;
   const canAnalyze = apiStatus === 'ready';
-  const nextEpisodeCount = Math.min(EPISODE_PREVIEW_LIMIT, Math.max(filteredEpisodes.length - boundedEpisodeOffset - EPISODE_PREVIEW_LIMIT, 0));
-  const previousEpisodeCount = Math.min(EPISODE_PREVIEW_LIMIT, boundedEpisodeOffset);
+  const nextEpisodeCount = Math.min(episodePageSize, Math.max(filteredEpisodes.length - boundedEpisodeOffset - episodePageSize, 0));
+  const previousEpisodeCount = Math.min(episodePageSize, boundedEpisodeOffset);
   const canShowNextEpisodes = nextEpisodeCount > 0;
   const canShowPreviousEpisodes = boundedEpisodeOffset > 0;
   const firstVisibleEpisodeNumber = filteredEpisodes.length ? boundedEpisodeOffset + 1 : 0;
@@ -613,20 +615,6 @@ export default function App() {
               )}
             </View>
 
-            {!isWide && (
-              <View style={styles.playerColumn}>
-                <PodcastPlayer
-                  episode={selectedEpisode}
-                  segments={selectedSegments}
-                  analyzing={analyzing}
-                  onAnalyze={runAnalysis}
-                  onUndoSkip={handleUndoSkip}
-                  canAnalyze={canAnalyze}
-                  analysisUnavailableLabel={analysisUnavailableLabel}
-                />
-              </View>
-            )}
-
             <View style={[styles.panel, isWide && styles.episodesPanel]}>
             <View style={styles.panelHeader}>
               <Text style={styles.panelTitle}>Episodes</Text>
@@ -686,34 +674,58 @@ export default function App() {
               </View>
             ) : (
               <>
-                {visibleEpisodes.length > 0 && (
-                  <ScrollView
-                    contentContainerStyle={styles.episodeListContent}
-                    nestedScrollEnabled
-                    style={[styles.episodeList, { maxHeight: episodeListMaxHeight }]}
-                  >
-                    {visibleEpisodes.map((episode) => (
-                      <Pressable
-                        key={episode.id}
-                        accessibilityRole="button"
-                        accessibilityLabel={episodeLabel(episode)}
-                        accessibilityState={{ selected: selectedEpisode?.id === episode.id }}
-                        onPress={() => selectEpisode(episode)}
-                        style={[styles.episodeRow, selectedEpisode?.id === episode.id && styles.episodeRowActive]}
-                      >
-                        <View style={styles.episodeCopy}>
-                          <Text numberOfLines={2} style={styles.episodeTitle}>
-                            {episode.title}
-                          </Text>
-                          <Text numberOfLines={1} style={styles.episodeMeta}>
-                            {formatDate(episode.pubDate)} {episode.duration ? `- ${formatDuration(episode.duration)}` : ''}
-                          </Text>
-                        </View>
-                        {segmentsByEpisode[episode.id]?.length ? <CheckCircle2 size={18} color="#2A9D8F" /> : <View style={styles.segmentEmptyDot} />}
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                )}
+                {visibleEpisodes.length > 0 &&
+                  (isWide ? (
+                    <ScrollView
+                      contentContainerStyle={styles.episodeListContent}
+                      nestedScrollEnabled
+                      style={[styles.episodeList, { maxHeight: episodeListMaxHeight }]}
+                    >
+                      {visibleEpisodes.map((episode) => (
+                        <Pressable
+                          key={episode.id}
+                          accessibilityRole="button"
+                          accessibilityLabel={episodeLabel(episode)}
+                          accessibilityState={{ selected: selectedEpisode?.id === episode.id }}
+                          onPress={() => selectEpisode(episode)}
+                          style={[styles.episodeRow, selectedEpisode?.id === episode.id && styles.episodeRowActive]}
+                        >
+                          <View style={styles.episodeCopy}>
+                            <Text numberOfLines={2} style={styles.episodeTitle}>
+                              {episode.title}
+                            </Text>
+                            <Text numberOfLines={1} style={styles.episodeMeta}>
+                              {formatDate(episode.pubDate)} {episode.duration ? `- ${formatDuration(episode.duration)}` : ''}
+                            </Text>
+                          </View>
+                          {segmentsByEpisode[episode.id]?.length ? <CheckCircle2 size={18} color="#2A9D8F" /> : <View style={styles.segmentEmptyDot} />}
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  ) : (
+                    <View style={styles.episodeListContent}>
+                      {visibleEpisodes.map((episode) => (
+                        <Pressable
+                          key={episode.id}
+                          accessibilityRole="button"
+                          accessibilityLabel={episodeLabel(episode)}
+                          accessibilityState={{ selected: selectedEpisode?.id === episode.id }}
+                          onPress={() => selectEpisode(episode)}
+                          style={[styles.episodeRow, selectedEpisode?.id === episode.id && styles.episodeRowActive]}
+                        >
+                          <View style={styles.episodeCopy}>
+                            <Text numberOfLines={2} style={styles.episodeTitle}>
+                              {episode.title}
+                            </Text>
+                            <Text numberOfLines={1} style={styles.episodeMeta}>
+                              {formatDate(episode.pubDate)} {episode.duration ? `- ${formatDuration(episode.duration)}` : ''}
+                            </Text>
+                          </View>
+                          {segmentsByEpisode[episode.id]?.length ? <CheckCircle2 size={18} color="#2A9D8F" /> : <View style={styles.segmentEmptyDot} />}
+                        </Pressable>
+                      ))}
+                    </View>
+                  ))}
                 {filteredEpisodes.length === 0 && (
                   <View style={styles.emptyPanel}>
                     <Search size={26} color="#6B7280" />
@@ -721,26 +733,16 @@ export default function App() {
                     {episodeQuery.trim() && <IconButton icon={X} label="Clear search" onPress={() => setEpisodeQuery('')} variant="secondary" />}
                   </View>
                 )}
-                {filteredEpisodes.length > EPISODE_PREVIEW_LIMIT && (
+                {filteredEpisodes.length > episodePageSize && (
                   <View style={styles.episodeListActions}>
                     {canShowPreviousEpisodes && (
-                      <IconButton
-                        icon={ChevronLeft}
-                        label={`Previous ${previousEpisodeCount}`}
-                        onPress={() => setEpisodeOffset((value) => Math.max(value - EPISODE_PREVIEW_LIMIT, 0))}
-                        variant="secondary"
-                      />
+                      <IconButton icon={ChevronLeft} label={`Previous ${previousEpisodeCount}`} onPress={() => setEpisodeOffset((value) => Math.max(value - episodePageSize, 0))} variant="secondary" />
                     )}
                     {canShowNextEpisodes && (
-                      <IconButton
-                        icon={ChevronRight}
-                        label={`Next ${nextEpisodeCount}`}
-                        onPress={() => setEpisodeOffset((value) => Math.min(value + EPISODE_PREVIEW_LIMIT, maxEpisodeOffset))}
-                        variant="secondary"
-                      />
+                      <IconButton icon={ChevronRight} label={`Next ${nextEpisodeCount}`} onPress={() => setEpisodeOffset((value) => Math.min(value + episodePageSize, maxEpisodeOffset))} variant="secondary" />
                     )}
                     {canShowPreviousEpisodes && (
-                      <IconButton icon={ListMusic} label={`First ${EPISODE_PREVIEW_LIMIT}`} onPress={() => setEpisodeOffset(0)} variant="secondary" />
+                      <IconButton icon={ListMusic} label={`First ${episodePageSize}`} onPress={() => setEpisodeOffset(0)} variant="secondary" />
                     )}
                   </View>
                 )}
@@ -748,8 +750,8 @@ export default function App() {
             )}
             </View>
 
-            {isWide && (
-              <View style={[styles.playerColumn, styles.playerPanel]}>
+            {(isWide || selectedEpisode) && (
+              <View style={[styles.playerColumn, isWide && styles.playerPanel]}>
                 <PodcastPlayer
                   episode={selectedEpisode}
                   segments={selectedSegments}

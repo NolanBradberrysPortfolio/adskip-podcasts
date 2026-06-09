@@ -27,6 +27,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.2",
     "@types/react": "~19.2.2",
@@ -43,7 +44,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "export:web": "expo export --platform web --clear",
-    "export:pages": "npm run export:web && node scripts/prepare-github-pages.mjs"
+    "export:pages": "npm run export:web && node scripts/prepare-github-pages.mjs",
+    "test:phone-pages": "playwright test tests/phone-smoke.spec.ts --browser=chromium --reporter=line"
   },
   "private": true
 }

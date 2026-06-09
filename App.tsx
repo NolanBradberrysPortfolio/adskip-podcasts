@@ -515,7 +515,7 @@ export default function App() {
     if (!isWide) {
       setTimeout(() => {
         if (Platform.OS === 'web' && typeof document !== 'undefined') {
-          document.querySelector('[data-testid="player-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          document.querySelector('[data-testid="player-panel"]')?.scrollIntoView({ behavior: 'auto', block: 'start' });
           return;
         }
 

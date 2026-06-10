@@ -74,6 +74,8 @@ gh workflow run pages.yml --repo NolanBradberrysPortfolio/adskip-podcasts --ref 
 
 This tunnel setup is for testing. If the tunnel restarts, the backend URL changes and Pages must be redeployed.
 
+`eas.json` points native development, preview, and production builds at the same temporary tunnel so the current builds can use RSS/import features. Replace `EXPO_PUBLIC_API_URL` there with a permanent HTTPS API before shipping a real iOS or Android release.
+
 ## AI Analysis
 
 If `OPENAI_API_KEY` is set, `/api/analyze` downloads audio files under `MAX_TRANSCRIPTION_AUDIO_MB`, transcribes them with `OPENAI_TRANSCRIBE_MODEL`, and creates skip segments from timestamped transcript cues.

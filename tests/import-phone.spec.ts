@@ -30,7 +30,7 @@ for (const width of [390, 430]) {
       await page.getByRole('button', { name: 'Import OPML' }).click();
 
       await expect(page.getByText(/Showing 1-12 of \d+ episodes/)).toBeVisible({ timeout: 45000 });
-      await expect(page.getByText('Up First from NPR')).toBeVisible();
+      await expect(page.getByRole('button', { name: /Up First from NPR, 150 episodes/i })).toBeVisible();
       await expectNoHorizontalOverflow(page);
     });
 
@@ -47,7 +47,7 @@ for (const width of [390, 430]) {
       await page.getByRole('button', { name: 'Import selected Spotify matches' }).click();
 
       await expect(page.getByText(/Showing 1-12 of \d+ episodes/)).toBeVisible({ timeout: 45000 });
-      await expect(page.getByText('Up First from NPR')).toBeVisible();
+      await expect(page.getByRole('button', { name: /Up First from NPR, 150 episodes/i })).toBeVisible();
       await expectNoHorizontalOverflow(page);
     });
   });

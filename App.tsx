@@ -522,9 +522,11 @@ export default function App() {
         capped: metadata?.capped || 0,
         rejected: metadata?.rejected || 0,
       };
+      const summaryMessage = importSummaryMessage(source, summary);
 
       if (!importedFeeds.length && failed > 0) {
-        throw new Error(`No ${source} feeds could be imported`);
+        setMessage(summaryMessage);
+        throw new Error(summaryMessage);
       }
 
       const nextFeeds = [
@@ -534,7 +536,7 @@ export default function App() {
       await persistFeeds(nextFeeds);
       setSelectedFeedId(importedFeeds[0]?.id || nextFeeds[0]?.id);
       setSelectedEpisodeId(importedFeeds[0]?.episodes[0]?.id || nextFeeds[0]?.episodes[0]?.id);
-      setMessage(importSummaryMessage(source, summary));
+      setMessage(summaryMessage);
       return summary;
     } finally {
       setLoadingFeed(false);

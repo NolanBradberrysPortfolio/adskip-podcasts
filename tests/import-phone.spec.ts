@@ -34,6 +34,22 @@ for (const width of [390, 430]) {
       await expectNoHorizontalOverflow(page);
     });
 
+    test('keeps useful feedback for zero-feed and partial OPML imports', async ({ page }) => {
+      await page.goto(`${pageBaseUrl}?importPhone=${width}-opml-feedback-${Date.now()}`, { waitUntil: 'networkidle' });
+      await expect(page.getByText('RSS ready')).toBeVisible();
+
+      await page.getByRole('button', { name: 'Import' }).click();
+      await page.getByLabel('OPML document').fill('<?xml version="1.0"?><opml version="2.0"><body></body></opml>');
+      await page.getByRole('button', { name: 'Import OPML' }).click();
+      await expect(page.getByText('No RSS subscriptions found in OPML')).toBeVisible();
+
+      await page.getByLabel('OPML document').fill(sampleOpml);
+      await page.getByRole('button', { name: 'Import OPML' }).click();
+      await expect(page.getByText(/Apple Podcasts: Imported 1; 1 failed/)).toBeVisible({ timeout: 45000 });
+      await expect(page.getByRole('button', { name: /Up First from NPR, 150 episodes/i })).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    });
+
     test('matches Spotify saved shows to public RSS and imports selected matches', async ({ page }) => {
       await page.goto(`${pageBaseUrl}?importPhone=${width}-spotify-${Date.now()}`, { waitUntil: 'networkidle' });
       await expect(page.getByText('RSS ready')).toBeVisible();

@@ -43,8 +43,15 @@ export function fetchApiHealth(): Promise<ApiHealth> {
   return requestJson<ApiHealth>('/api/health');
 }
 
-export function importOpml(opml: string): Promise<{ feeds: string[]; rejected?: number }> {
-  return requestJson<{ feeds: string[]; rejected?: number }>('/api/opml', {
+export type OpmlImportResult = {
+  feeds: string[];
+  rejected?: number;
+  capped?: number;
+  total?: number;
+};
+
+export function importOpml(opml: string): Promise<OpmlImportResult> {
+  return requestJson<OpmlImportResult>('/api/opml', {
     method: 'POST',
     body: JSON.stringify({ opml }),
   });

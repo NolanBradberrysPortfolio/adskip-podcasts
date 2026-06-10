@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import {
   ActivityIndicator,
   Image,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -20,7 +21,7 @@ import { loadSavedFeeds, loadSavedSegments, saveFeeds, saveSegments } from './sr
 import type { AdSegment, PodcastEpisode, PodcastFeed } from './src/types';
 import { formatDate, formatDuration } from './src/utils/format';
 import { IconButton } from './src/components/IconButton';
-import { ImportWizard, type ImportProgress, type ImportSummary } from './src/components/ImportWizard';
+import { ImportWizard, type ImportMetadata, type ImportProgress, type ImportSummary } from './src/components/ImportWizard';
 import { PodcastPlayer } from './src/components/PodcastPlayer';
 
 type ApiStatus = 'checking' | 'api-offline' | 'ai-offline' | 'ready';
@@ -179,6 +180,60 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function importSummaryMessage(source: string, summary: ImportSummary): string {
+  const failedTotal = summary.failed + (summary.rejected || 0);
+  const parts = [`Imported ${summary.imported}`];
+
+  if (failedTotal) {
+    parts.push(`${failedTotal} failed`);
+  }
+
+  if (summary.skipped) {
+    parts.push(`${summary.skipped} skipped`);
+  }
+
+  if (summary.capped) {
+    parts.push(`${summary.capped} over limit`);
+  }
+
+  return `${source}: ${parts.join('; ')}`;
+}
+
+function clearSpotifyImportFragment(): void {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+  hashParams.delete('spotifyImportToken');
+  hashParams.delete('spotifyImportError');
+  url.searchParams.delete('spotifyImportToken');
+  url.searchParams.delete('spotifyImportError');
+  url.hash = hashParams.toString();
+  window.history.replaceState({}, document.title, url.toString());
+}
+
+function spotifyImportParamsFromUrl(rawUrl: string): { token?: string; error?: string } {
+  try {
+    const url = new URL(rawUrl);
+    const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+    return {
+      error: hashParams.get('spotifyImportError') || url.searchParams.get('spotifyImportError') || undefined,
+      token: hashParams.get('spotifyImportToken') || url.searchParams.get('spotifyImportToken') || undefined,
+    };
+  } catch {
+    const hash = rawUrl.includes('#') ? rawUrl.slice(rawUrl.indexOf('#') + 1) : '';
+    const query = rawUrl.includes('?') ? rawUrl.slice(rawUrl.indexOf('?') + 1, rawUrl.includes('#') ? rawUrl.indexOf('#') : undefined) : '';
+    const hashParams = new URLSearchParams(hash);
+    const queryParams = new URLSearchParams(query);
+    return {
+      error: hashParams.get('spotifyImportError') || queryParams.get('spotifyImportError') || undefined,
+      token: hashParams.get('spotifyImportToken') || queryParams.get('spotifyImportToken') || undefined,
+    };
+  }
+}
+
 export default function App() {
   const { width, height } = useWindowDimensions();
   const isWide = width >= WIDE_BREAKPOINT;
@@ -267,20 +322,44 @@ export default function App() {
   }, [modalOpen]);
 
   useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') {
-      return;
+    const handleSpotifyImportUrl = (rawUrl: string) => {
+      const { error, token } = spotifyImportParamsFromUrl(rawUrl);
+      if (error) {
+        setMessage(error);
+        clearSpotifyImportFragment();
+        return;
+      }
+
+      if (!token) {
+        return;
+      }
+
+      setSpotifyResultToken(token);
+      setOpmlModalOpen(true);
+    };
+
+    if (Platform.OS !== 'web') {
+      let active = true;
+      Linking.getInitialURL()
+        .then((initialUrl) => {
+          if (active && initialUrl) {
+            handleSpotifyImportUrl(initialUrl);
+          }
+        })
+        .catch(() => undefined);
+      const subscription = Linking.addEventListener('url', ({ url }) => handleSpotifyImportUrl(url));
+      return () => {
+        active = false;
+        subscription.remove();
+      };
     }
 
-    const url = new URL(window.location.href);
-    const token = url.searchParams.get('spotifyImportToken');
-    if (!token) {
-      return;
+    if (typeof window === 'undefined') {
+      return undefined;
     }
 
-    url.searchParams.delete('spotifyImportToken');
-    window.history.replaceState({}, document.title, url.toString());
-    setSpotifyResultToken(token);
-    setOpmlModalOpen(true);
+    handleSpotifyImportUrl(window.location.href);
+    return undefined;
   }, []);
 
   const checkApiHealth = async () => {
@@ -389,6 +468,7 @@ export default function App() {
     urls: string[],
     source: string,
     onProgress?: (progress: ImportProgress) => void,
+    metadata?: ImportMetadata,
   ): Promise<ImportSummary> => {
     if (!apiReachable) {
       throw new Error(apiStatus === 'checking' ? 'API health check is still running' : 'API unavailable');
@@ -397,7 +477,15 @@ export default function App() {
     const existingUrls = new Set(feeds.map((feed) => feed.feedUrl));
     const uniqueUrls = [...new Set(urls)].filter((url) => !existingUrls.has(url));
     if (!uniqueUrls.length) {
-      return { imported: 0, failed: 0, skipped: urls.length };
+      const summary = {
+        imported: 0,
+        failed: 0,
+        skipped: urls.length,
+        capped: metadata?.capped || 0,
+        rejected: metadata?.rejected || 0,
+      };
+      setMessage(importSummaryMessage(source, summary));
+      return summary;
     }
 
     setLoadingFeed(true);
@@ -427,6 +515,13 @@ export default function App() {
       const importedUrls = new Set(importedFeeds.map((feed) => feed.feedUrl));
       const failed = uniqueUrls.length - importedFeeds.length;
       const skipped = urls.length - uniqueUrls.length;
+      const summary = {
+        imported: importedFeeds.length,
+        failed,
+        skipped,
+        capped: metadata?.capped || 0,
+        rejected: metadata?.rejected || 0,
+      };
 
       if (!importedFeeds.length && failed > 0) {
         throw new Error(`No ${source} feeds could be imported`);
@@ -439,8 +534,8 @@ export default function App() {
       await persistFeeds(nextFeeds);
       setSelectedFeedId(importedFeeds[0]?.id || nextFeeds[0]?.id);
       setSelectedEpisodeId(importedFeeds[0]?.episodes[0]?.id || nextFeeds[0]?.episodes[0]?.id);
-      setMessage(failed ? `Imported ${importedFeeds.length}; ${failed} failed` : `Imported ${importedFeeds.length}`);
-      return { imported: importedFeeds.length, failed, skipped };
+      setMessage(importSummaryMessage(source, summary));
+      return summary;
     } finally {
       setLoadingFeed(false);
     }
@@ -867,7 +962,12 @@ export default function App() {
         busy={loadingFeed}
         initialFocusRef={opmlInputRef}
         spotifyResultToken={spotifyResultToken}
-        onClearSpotifyResultToken={() => setSpotifyResultToken(undefined)}
+        onClearSpotifyResultToken={(consumed) => {
+          setSpotifyResultToken(undefined);
+          if (consumed) {
+            clearSpotifyImportFragment();
+          }
+        }}
         onClose={() => setOpmlModalOpen(false)}
         onImportFeedUrls={importFeedUrls}
       />

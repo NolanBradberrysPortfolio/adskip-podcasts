@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import Parser from 'rss-parser';
 import OpenAI from 'openai';
-import { XMLParser } from 'fast-xml-parser';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -45,16 +45,24 @@ const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID?.trim();
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET?.trim();
 const SPOTIFY_REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI?.trim();
 const SPOTIFY_IMPORT_MAX_SHOWS = readPositiveInteger('SPOTIFY_IMPORT_MAX_SHOWS', 100);
+const SPOTIFY_MATCH_RATE_LIMIT_WINDOW_MS = readPositiveInteger('SPOTIFY_MATCH_RATE_LIMIT_WINDOW_MS', 60_000);
+const SPOTIFY_MATCH_RATE_LIMIT_MAX_REQUESTS = readPositiveInteger('SPOTIFY_MATCH_RATE_LIMIT_MAX_REQUESTS', 12);
+const SPOTIFY_SESSION_MAX_ENTRIES = readPositiveInteger('SPOTIFY_SESSION_MAX_ENTRIES', 500);
+const PODCAST_SEARCH_CACHE_MAX_ENTRIES = readPositiveInteger('PODCAST_SEARCH_CACHE_MAX_ENTRIES', 500);
+const PODCAST_SEARCH_CACHE_TTL_MS = readPositiveInteger('PODCAST_SEARCH_CACHE_TTL_MS', 10 * 60_000);
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin: string) => origin.trim())
   .filter(Boolean);
 const GITHUB_PAGES_ORIGIN = 'https://nolanbradberrysportfolio.github.io';
-const LOCAL_DEV_ORIGINS = ['http://localhost:8081', 'http://127.0.0.1:8081'];
 const HAS_EXPLICIT_CORS = CORS_ORIGINS.length > 0;
+const LOCAL_DEV_ORIGINS = (process.env.ALLOW_LOCAL_DEV_CORS === 'true' || (!IS_PRODUCTION && !HAS_EXPLICIT_CORS))
+  ? ['http://localhost:8081', 'http://127.0.0.1:8081']
+  : [];
 const ALLOW_PERMISSIVE_CORS = !HAS_EXPLICIT_CORS && ALLOW_ANY_CORS_ORIGIN;
 const ALLOWED_CORS_ORIGINS = [...CORS_ORIGINS, GITHUB_PAGES_ORIGIN, ...LOCAL_DEV_ORIGINS];
 const SPOTIFY_IMPORT_CONFIGURED = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REDIRECT_URI);
+const GITHUB_PAGES_APP_URL = `${GITHUB_PAGES_ORIGIN}/adskip-podcasts/`;
 
 if (IS_PRODUCTION && !HAS_EXPLICIT_CORS) {
   throw new Error('CORS_ORIGINS must be set in production.');
@@ -218,6 +226,9 @@ type ItunesSearchResponse = {
 
 const spotifyImportSessions = new Map<string, SpotifyImportSession>();
 const spotifyImportResults = new Map<string, SpotifyImportResult>();
+const podcastSearchCache = new Map<string, { expiresAt: number; result?: ItunesSearchResult }>();
+const spotifyMatchRateBuckets = new Map<string, RateBucket>();
+let nextSpotifyMatchRateLimitPruneAt = Date.now() + SPOTIFY_MATCH_RATE_LIMIT_WINDOW_MS;
 
 const app = express();
 app.use(applyCors);
@@ -259,14 +270,17 @@ app.post('/api/opml', async (request, response) => {
   }
 
   try {
-    const candidates = extractOpmlFeeds(parsed.data.opml).slice(0, 100);
+    const extracted = extractOpmlFeeds(parsed.data.opml);
+    const candidates = extracted.feeds.slice(0, 100);
     const outcomes = await mapWithConcurrency(candidates, OPML_VALIDATE_CONCURRENCY, async (url) => ({
         url,
         safeUrl: await validatePublicHttpUrl(url).catch(() => undefined),
       }));
-    const feeds = outcomes.map((outcome) => outcome.safeUrl).filter((url): url is string => Boolean(url)).slice(0, 50);
-    const rejected = outcomes.length - feeds.length;
-    response.json({ feeds, rejected });
+    const validFeeds = outcomes.map((outcome) => outcome.safeUrl).filter((url): url is string => Boolean(url));
+    const feeds = validFeeds.slice(0, 50);
+    const rejected = outcomes.length - validFeeds.length;
+    const capped = Math.max(0, extracted.feeds.length - candidates.length) + Math.max(0, validFeeds.length - feeds.length);
+    response.json({ feeds, rejected, capped, total: extracted.feeds.length });
   } catch (error) {
     response.status(400).json({ error: error instanceof Error ? error.message : 'OPML could not be parsed' });
   }
@@ -279,6 +293,10 @@ app.get('/api/import/spotify/status', (_request, response) => {
 app.get('/api/import/spotify/start', (request, response) => {
   if (!SPOTIFY_IMPORT_CONFIGURED) {
     response.status(503).json({ error: 'Spotify import is not configured on this API server' });
+    return;
+  }
+
+  if (!reserveSpotifyImportSessionSlot(response)) {
     return;
   }
 
@@ -312,11 +330,27 @@ app.get('/api/import/spotify/start', (request, response) => {
 app.get('/api/import/spotify/callback', async (request, response) => {
   const state = String(request.query.state || '');
   const code = String(request.query.code || '');
+  const spotifyError = String(request.query.error || '');
   const session = spotifyImportSessions.get(state);
   spotifyImportSessions.delete(state);
 
-  if (!SPOTIFY_IMPORT_CONFIGURED || !session || session.expiresAt < Date.now() || !code) {
-    response.status(400).send('Spotify import session expired or is invalid.');
+  if (!SPOTIFY_IMPORT_CONFIGURED) {
+    redirectSpotifyImportError(response, undefined, 'Spotify import is not configured on this API server');
+    return;
+  }
+
+  if (!session || session.expiresAt < Date.now()) {
+    redirectSpotifyImportError(response, undefined, 'Spotify import session expired or is invalid');
+    return;
+  }
+
+  if (spotifyError) {
+    redirectSpotifyImportError(response, session.returnTo, `Spotify authorization failed: ${spotifyError}`);
+    return;
+  }
+
+  if (!code) {
+    redirectSpotifyImportError(response, session.returnTo, 'Spotify did not return an authorization code');
     return;
   }
 
@@ -324,6 +358,11 @@ app.get('/api/import/spotify/callback', async (request, response) => {
     const accessToken = await exchangeSpotifyCode(code, session.codeVerifier);
     const shows = await fetchSpotifySavedShows(accessToken);
     const matches = await matchShowsToFeedCandidates(shows);
+    if (!hasSpotifyImportResultSlot()) {
+      redirectSpotifyImportError(response, session.returnTo, 'Too many Spotify import results pending');
+      return;
+    }
+
     const token = randomUUID();
     spotifyImportResults.set(token, {
       expiresAt: Date.now() + 10 * 60_000,
@@ -331,11 +370,9 @@ app.get('/api/import/spotify/callback', async (request, response) => {
       total: shows.length,
     });
 
-    const returnUrl = new URL(session.returnTo);
-    returnUrl.searchParams.set('spotifyImportToken', token);
-    response.redirect(returnUrl.toString());
+    response.redirect(spotifyImportReturnUrl(session.returnTo, { spotifyImportToken: token }));
   } catch (error) {
-    response.status(502).send(error instanceof Error ? error.message : 'Spotify import failed.');
+    redirectSpotifyImportError(response, session.returnTo, error instanceof Error ? error.message : 'Spotify import failed');
   }
 });
 
@@ -354,6 +391,10 @@ app.get('/api/import/spotify/result/:token', (request, response) => {
 });
 
 app.post('/api/import/spotify/match', async (request, response) => {
+  if (!takeSpotifyMatchRateLimit(request, response)) {
+    return;
+  }
+
   const parsed = spotifyMatchSchema.safeParse(request.body);
 
   if (!parsed.success) {
@@ -486,6 +527,50 @@ function takeAnalyzeRateLimit(request: express.Request, response: express.Respon
 
   response.status(429).json({ error: 'Analyze rate limit exceeded' });
   return false;
+}
+
+function takeSpotifyMatchRateLimit(request: express.Request, response: express.Response): boolean {
+  const now = Date.now();
+  if (now >= nextSpotifyMatchRateLimitPruneAt) {
+    pruneRateBuckets(spotifyMatchRateBuckets, now);
+    nextSpotifyMatchRateLimitPruneAt = now + SPOTIFY_MATCH_RATE_LIMIT_WINDOW_MS;
+  }
+
+  if (takeRateLimitSlot(spotifyMatchRateBuckets, rateLimitKey(request), now, SPOTIFY_MATCH_RATE_LIMIT_WINDOW_MS, SPOTIFY_MATCH_RATE_LIMIT_MAX_REQUESTS)) {
+    return true;
+  }
+
+  response.status(429).json({ error: 'Spotify import rate limit exceeded' });
+  return false;
+}
+
+function reserveSpotifyImportSessionSlot(response: express.Response): boolean {
+  pruneSpotifyImportState();
+  if (spotifyImportSessions.size < SPOTIFY_SESSION_MAX_ENTRIES) {
+    return true;
+  }
+
+  response.status(429).json({ error: 'Too many Spotify imports in progress' });
+  return false;
+}
+
+function hasSpotifyImportResultSlot(): boolean {
+  pruneSpotifyImportState();
+  return spotifyImportResults.size < SPOTIFY_SESSION_MAX_ENTRIES;
+}
+
+function pruneSpotifyImportState(now = Date.now()): void {
+  for (const [state, session] of spotifyImportSessions.entries()) {
+    if (session.expiresAt <= now) {
+      spotifyImportSessions.delete(state);
+    }
+  }
+
+  for (const [token, result] of spotifyImportResults.entries()) {
+    if (result.expiresAt <= now) {
+      spotifyImportResults.delete(token);
+    }
+  }
 }
 
 function rateLimitKey(request: express.Request): string {
@@ -1013,9 +1098,25 @@ function unavailableAnalysis(episode: z.infer<typeof analyzeSchema>, reason: str
   };
 }
 
+function spotifyImportReturnUrl(returnTo: string | undefined, params: Record<string, string>): string {
+  const returnUrl = new URL(returnTo || GITHUB_PAGES_APP_URL);
+  const hashParams = new URLSearchParams(returnUrl.hash.replace(/^#/, ''));
+  Object.entries(params).forEach(([key, value]) => hashParams.set(key, value));
+  returnUrl.hash = hashParams.toString();
+  return returnUrl.toString();
+}
+
+function redirectSpotifyImportError(response: express.Response, returnTo: string | undefined, message: string): void {
+  response.redirect(spotifyImportReturnUrl(returnTo, { spotifyImportError: message }));
+}
+
 function validateSpotifyReturnTo(returnTo: string): string | undefined {
   try {
     const url = new URL(returnTo);
+    if (url.protocol === 'skipcast:' && url.hostname === 'spotify-import') {
+      return url.toString();
+    }
+
     if (!['http:', 'https:'].includes(url.protocol)) {
       return undefined;
     }
@@ -1114,17 +1215,33 @@ async function fetchSpotifySavedShows(accessToken: string): Promise<SpotifyImpor
 }
 
 async function matchShowsToFeedCandidates(shows: SpotifyImportShow[]): Promise<ImportFeedCandidate[]> {
-  const normalizedShows = shows
+  const normalizedShows = dedupeSpotifyShows(shows
     .map((show) => ({
       ...show,
       title: cleanText(show.title),
       publisher: cleanText(show.publisher),
     }))
     .filter((show) => show.title)
-    .slice(0, SPOTIFY_IMPORT_MAX_SHOWS);
+    .slice(0, SPOTIFY_IMPORT_MAX_SHOWS));
 
   return mapWithConcurrency(normalizedShows, Math.min(4, OPML_VALIDATE_CONCURRENCY), async (show) => {
-    const result = await searchPodcastDirectory(show).catch(() => undefined);
+    let result: ItunesSearchResult | undefined;
+    try {
+      result = await searchPodcastDirectory(show);
+    } catch {
+      return {
+        id: stableId(`spotify:${show.title}:${show.publisher || ''}:provider-failed`),
+        source: 'spotify',
+        status: 'unavailable',
+        title: show.title,
+        publisher: show.publisher,
+        artworkUrl: show.imageUrl,
+        confidence: 0,
+        reason: 'Podcast directory unavailable; retry later',
+        externalUrl: show.spotifyUrl,
+      };
+    }
+
     if (!result?.feedUrl) {
       return {
         id: stableId(`spotify:${show.title}:${show.publisher || ''}:unavailable`),
@@ -1170,8 +1287,31 @@ async function matchShowsToFeedCandidates(shows: SpotifyImportShow[]): Promise<I
   });
 }
 
+function dedupeSpotifyShows(shows: SpotifyImportShow[]): SpotifyImportShow[] {
+  const seen = new Set<string>();
+  const unique: SpotifyImportShow[] = [];
+
+  for (const show of shows) {
+    const key = `${normalizeMatchText(show.title)}:${normalizeMatchText(show.publisher)}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(show);
+  }
+
+  return unique;
+}
+
 async function searchPodcastDirectory(show: SpotifyImportShow): Promise<ItunesSearchResult | undefined> {
   const term = [show.title, show.publisher].filter(Boolean).join(' ');
+  const cacheKey = normalizeMatchText(term);
+  const cached = podcastSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.result;
+  }
+
   const url = new URL('https://itunes.apple.com/search');
   url.searchParams.set('media', 'podcast');
   url.searchParams.set('entity', 'podcast');
@@ -1182,12 +1322,36 @@ async function searchPodcastDirectory(show: SpotifyImportShow): Promise<ItunesSe
   const payload = JSON.parse(text) as ItunesSearchResponse;
   const results = (payload.results || []).filter((result) => result.feedUrl);
   if (!results.length) {
+    setPodcastSearchCache(cacheKey, undefined);
     return undefined;
   }
 
-  return results
+  const result = results
     .map((result) => ({ result, score: scorePodcastMatch(show, result) }))
     .sort((a, b) => b.score - a.score)[0]?.result;
+  setPodcastSearchCache(cacheKey, result);
+  return result;
+}
+
+function setPodcastSearchCache(cacheKey: string, result: ItunesSearchResult | undefined): void {
+  const now = Date.now();
+  for (const [key, entry] of podcastSearchCache.entries()) {
+    if (entry.expiresAt <= now) {
+      podcastSearchCache.delete(key);
+    }
+  }
+
+  if (podcastSearchCache.size >= PODCAST_SEARCH_CACHE_MAX_ENTRIES) {
+    const oldestKey = podcastSearchCache.keys().next().value as string | undefined;
+    if (oldestKey) {
+      podcastSearchCache.delete(oldestKey);
+    }
+  }
+
+  podcastSearchCache.set(cacheKey, {
+    expiresAt: now + PODCAST_SEARCH_CACHE_TTL_MS,
+    result,
+  });
 }
 
 function scorePodcastMatch(show: SpotifyImportShow, result: ItunesSearchResult): number {
@@ -1251,8 +1415,14 @@ function tokenOverlap(left: string, right: string): number {
   return shared / Math.max(leftTokens.size, rightTokens.size);
 }
 
-function extractOpmlFeeds(opml: string): string[] {
+function extractOpmlFeeds(opml: string): { feeds: string[] } {
   assertOpmlTextWithinLimits(opml);
+  const validation = XMLValidator.validate(opml, {
+    allowBooleanAttributes: true,
+  });
+  if (validation !== true) {
+    throw new Error('OPML XML is not well formed');
+  }
 
   const parser = new XMLParser({
     ignoreAttributes: false,
@@ -1260,6 +1430,10 @@ function extractOpmlFeeds(opml: string): string[] {
     processEntities: false,
   });
   const document = parser.parse(opml);
+  if (!document?.opml || typeof document.opml !== 'object' || !Object.prototype.hasOwnProperty.call(document.opml, 'body')) {
+    throw new Error('Document is not a valid OPML subscription file');
+  }
+
   const feeds = new Set<string>();
   let nodeCount = 0;
 
@@ -1291,9 +1465,9 @@ function extractOpmlFeeds(opml: string): string[] {
     Object.values(record).forEach((child) => visit(child, depth + 1));
   };
 
-  visit(document);
+  visit(document.opml.body);
 
-  return [...feeds];
+  return { feeds: [...feeds] };
 }
 
 function assertOpmlTextWithinLimits(opml: string): void {

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type RefObject } from 'react';
 import { ActivityIndicator, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import { CheckCircle2, FileText, ListMusic, Music2, Upload, X } from 'lucide-react-native';
 import { fetchSpotifyImportResult, fetchSpotifyImportStatus, importOpml, matchSpotifyShows, spotifyConnectUrl } from '../services/api';
 import type { ImportFeedCandidate, SpotifyImportShow } from '../types';
@@ -16,6 +18,13 @@ export type ImportSummary = {
   imported: number;
   failed: number;
   skipped: number;
+  rejected?: number;
+  capped?: number;
+};
+
+export type ImportMetadata = {
+  rejected?: number;
+  capped?: number;
 };
 
 type Props = {
@@ -24,9 +33,9 @@ type Props = {
   busy: boolean;
   initialFocusRef?: RefObject<TextInput | null>;
   spotifyResultToken?: string;
-  onClearSpotifyResultToken: () => void;
+  onClearSpotifyResultToken: (consumed?: boolean) => void;
   onClose: () => void;
-  onImportFeedUrls: (urls: string[], source: string, onProgress?: (progress: ImportProgress) => void) => Promise<ImportSummary>;
+  onImportFeedUrls: (urls: string[], source: string, onProgress?: (progress: ImportProgress) => void, metadata?: ImportMetadata) => Promise<ImportSummary>;
 };
 
 function modalWebProps(): Record<string, unknown> {
@@ -97,6 +106,23 @@ function parseSpotifyShows(text: string): SpotifyImportShow[] {
     .filter((show) => show.title);
 }
 
+function dedupeSpotifyMatches(matches: ImportFeedCandidate[]): ImportFeedCandidate[] {
+  const seen = new Set<string>();
+  const unique: ImportFeedCandidate[] = [];
+
+  for (const match of matches) {
+    const key = match.feedUrl ? `feed:${match.feedUrl}` : `match:${match.id}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(match);
+  }
+
+  return unique;
+}
+
 export function ImportWizard({
   visible,
   apiReachable,
@@ -142,6 +168,7 @@ export function ImportWizard({
     }
 
     let active = true;
+    let loaded = false;
     setMode('spotify');
     setWorking(true);
     setStatus('Loading Spotify matches');
@@ -153,6 +180,7 @@ export function ImportWizard({
         }
 
         receiveSpotifyMatches(result.matches, `Matched ${result.matches.length} of ${result.total} Spotify shows`);
+        loaded = true;
       })
       .catch((error) => {
         if (active) {
@@ -162,7 +190,9 @@ export function ImportWizard({
       .finally(() => {
         if (active) {
           setWorking(false);
-          onClearSpotifyResultToken();
+          if (loaded) {
+            onClearSpotifyResultToken(true);
+          }
         }
       });
 
@@ -172,13 +202,19 @@ export function ImportWizard({
   }, [onClearSpotifyResultToken, spotifyResultToken, visible]);
 
   const receiveSpotifyMatches = (matches: ImportFeedCandidate[], nextStatus: string) => {
-    setSpotifyMatches(matches);
-    setSelectedMatchIds(new Set(matches.filter((match) => match.status === 'matched' && match.feedUrl).map((match) => match.id)));
-    setStatus(nextStatus);
+    const uniqueMatches = dedupeSpotifyMatches(matches);
+    setSpotifyMatches(uniqueMatches);
+    setSelectedMatchIds(new Set(uniqueMatches.filter((match) => match.status === 'matched' && match.feedUrl).map((match) => match.id)));
+    setStatus(uniqueMatches.length === matches.length ? nextStatus : `${nextStatus}; ${matches.length - uniqueMatches.length} duplicate hidden`);
   };
 
   const chooseOpmlFile = () => {
-    if (Platform.OS !== 'web' || typeof document === 'undefined') {
+    if (Platform.OS !== 'web') {
+      chooseNativeOpmlFile();
+      return;
+    }
+
+    if (typeof document === 'undefined') {
       setStatus('Paste OPML on this device');
       return;
     }
@@ -204,6 +240,28 @@ export function ImportWizard({
     input.click();
   };
 
+  const chooseNativeOpmlFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+        type: ['text/xml', 'application/xml', 'text/x-opml', '*/*'],
+      });
+
+      if (result.canceled || !result.assets?.[0]) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const contents = await FileSystem.readAsStringAsync(asset.uri);
+      setOpmlText(contents);
+      setFileName(asset.name || 'Selected OPML file');
+      setStatus(`Loaded ${asset.name || 'OPML file'}`);
+    } catch {
+      setStatus('OPML file could not be read');
+    }
+  };
+
   const submitOpml = async () => {
     const trimmed = opmlText.trim();
     if (!trimmed) {
@@ -216,9 +274,18 @@ export function ImportWizard({
 
     try {
       const result = await importOpml(trimmed);
-      const summary = await onImportFeedUrls(result.feeds, importModeLabel(mode), setProgress);
-      setStatus(summary.failed || result.rejected
-        ? `Imported ${summary.imported}; ${summary.failed + (result.rejected || 0)} failed; ${summary.skipped} skipped`
+      if (!result.feeds.length && !result.rejected && !result.capped) {
+        setStatus('No RSS subscriptions found in OPML');
+        return;
+      }
+
+      const summary = await onImportFeedUrls(result.feeds, importModeLabel(mode), setProgress, {
+        capped: result.capped || 0,
+        rejected: result.rejected || 0,
+      });
+      const failedTotal = summary.failed + (summary.rejected || 0);
+      setStatus(failedTotal || summary.capped
+        ? `Imported ${summary.imported}; ${failedTotal} failed; ${summary.skipped} skipped; ${summary.capped || 0} capped`
         : `Imported ${summary.imported}; ${summary.skipped} skipped`);
       setOpmlText('');
       setFileName('');
@@ -232,13 +299,13 @@ export function ImportWizard({
   };
 
   const connectSpotify = async () => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') {
-      setStatus('Spotify sign-in is available from the web app');
+    if (Platform.OS === 'web' && typeof window === 'undefined') {
+      setStatus('Spotify sign-in is unavailable in this browser');
       return;
     }
 
     try {
-      const returnTo = `${window.location.origin}${window.location.pathname}`;
+      const returnTo = Platform.OS === 'web' ? `${window.location.origin}${window.location.pathname}` : 'skipcast://spotify-import';
       await Linking.openURL(spotifyConnectUrl(returnTo));
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Spotify sign-in failed');
@@ -380,12 +447,15 @@ export function ImportWizard({
                 </View>
                 <IconButton
                   icon={ListMusic}
-                  label={spotifyConfigured ? 'Connect Spotify' : 'Spotify sign-in unavailable'}
+                  label={spotifyConfigured ? 'Connect Spotify' : 'Spotify sign-in needs backend setup'}
                   onPress={connectSpotify}
                   disabled={disabled || spotifyConfigured === false}
                   variant="secondary"
                   style={styles.fullButton}
                 />
+                {spotifyConfigured === false && (
+                  <Text style={styles.helperText}>Paste show names below to match Spotify subscriptions without sign-in.</Text>
+                )}
                 <TextInput
                   value={spotifyShowsText}
                   onChangeText={setSpotifyShowsText}
@@ -472,8 +542,8 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   closeButton: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
@@ -485,7 +555,7 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   modeButton: {
-    minHeight: 40,
+    minHeight: 44,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#CAD3CB',
@@ -534,6 +604,12 @@ const styles = StyleSheet.create({
     color: '#5F6B63',
     fontSize: 12,
     fontWeight: '800',
+  },
+  helperText: {
+    color: '#5F6B63',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 17,
   },
   textArea: {
     minHeight: 180,

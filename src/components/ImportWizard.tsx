@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type RefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { ActivityIndicator, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -143,6 +143,7 @@ export function ImportWizard({
   const [spotifyShowsText, setSpotifyShowsText] = useState('');
   const [spotifyMatches, setSpotifyMatches] = useState<ImportFeedCandidate[]>([]);
   const [selectedMatchIds, setSelectedMatchIds] = useState<Set<string>>(new Set());
+  const onClearSpotifyResultTokenRef = useRef(onClearSpotifyResultToken);
   const disabled = busy || working || !apiReachable;
 
   const selectedSpotifyUrls = useMemo(
@@ -161,6 +162,10 @@ export function ImportWizard({
       .then((result) => setSpotifyConfigured(result.configured))
       .catch(() => setSpotifyConfigured(false));
   }, [apiReachable, visible]);
+
+  useEffect(() => {
+    onClearSpotifyResultTokenRef.current = onClearSpotifyResultToken;
+  }, [onClearSpotifyResultToken]);
 
   useEffect(() => {
     if (!visible || !spotifyResultToken) {
@@ -191,7 +196,7 @@ export function ImportWizard({
         if (active) {
           setWorking(false);
           if (loaded) {
-            onClearSpotifyResultToken(true);
+            onClearSpotifyResultTokenRef.current(true);
           }
         }
       });
@@ -199,7 +204,7 @@ export function ImportWizard({
     return () => {
       active = false;
     };
-  }, [onClearSpotifyResultToken, spotifyResultToken, visible]);
+  }, [spotifyResultToken, visible]);
 
   const receiveSpotifyMatches = (matches: ImportFeedCandidate[], nextStatus: string) => {
     const uniqueMatches = dedupeSpotifyMatches(matches);

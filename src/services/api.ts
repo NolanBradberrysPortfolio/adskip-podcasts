@@ -1,4 +1,4 @@
-import type { AnalysisResult, PodcastEpisode, PodcastFeed } from '../types';
+import type { AnalysisResult, ImportFeedCandidate, PodcastEpisode, PodcastFeed, SpotifyImportShow } from '../types';
 
 const DEFAULT_API_URL = 'http://localhost:4300';
 const isProduction = process.env.NODE_ENV === 'production';
@@ -48,6 +48,29 @@ export function importOpml(opml: string): Promise<{ feeds: string[]; rejected?: 
     method: 'POST',
     body: JSON.stringify({ opml }),
   });
+}
+
+export function fetchSpotifyImportStatus(): Promise<{ configured: boolean }> {
+  return requestJson<{ configured: boolean }>('/api/import/spotify/status');
+}
+
+export function matchSpotifyShows(shows: SpotifyImportShow[]): Promise<{ matches: ImportFeedCandidate[]; total: number }> {
+  return requestJson<{ matches: ImportFeedCandidate[]; total: number }>('/api/import/spotify/match', {
+    method: 'POST',
+    body: JSON.stringify({ shows }),
+  });
+}
+
+export function fetchSpotifyImportResult(token: string): Promise<{ matches: ImportFeedCandidate[]; total: number }> {
+  return requestJson<{ matches: ImportFeedCandidate[]; total: number }>(`/api/import/spotify/result/${encodeURIComponent(token)}`);
+}
+
+export function spotifyConnectUrl(returnTo: string): string {
+  if (!API_BASE_URL) {
+    throw new Error('Set EXPO_PUBLIC_API_URL to your deployed HTTPS API.');
+  }
+
+  return `${API_BASE_URL}/api/import/spotify/start?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
 export function analyzeEpisode(episode: PodcastEpisode, knownDuration?: number): Promise<AnalysisResult> {

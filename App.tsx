@@ -15,11 +15,12 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Clock, ListMusic, Plus, Radio, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react-native';
-import { analyzeEpisode, fetchApiHealth, fetchPodcastFeed, importOpml } from './src/services/api';
+import { analyzeEpisode, fetchApiHealth, fetchPodcastFeed } from './src/services/api';
 import { loadSavedFeeds, loadSavedSegments, saveFeeds, saveSegments } from './src/storage/subscriptions';
 import type { AdSegment, PodcastEpisode, PodcastFeed } from './src/types';
 import { formatDate, formatDuration } from './src/utils/format';
 import { IconButton } from './src/components/IconButton';
+import { ImportWizard, type ImportProgress, type ImportSummary } from './src/components/ImportWizard';
 import { PodcastPlayer } from './src/components/PodcastPlayer';
 
 type ApiStatus = 'checking' | 'api-offline' | 'ai-offline' | 'ready';
@@ -28,6 +29,7 @@ type FocusableRef = { focus: () => void };
 const WIDE_BREAKPOINT = 1120;
 const DESKTOP_EPISODE_PAGE_SIZE = 80;
 const MOBILE_EPISODE_PAGE_SIZE = 12;
+const IMPORT_FETCH_CONCURRENCY = 4;
 
 function useModalFocusTrap(visible: boolean, modalTestId: string, initialFocusRef?: RefObject<FocusableRef | null>, restoreFocusSelector?: string) {
   useEffect(() => {
@@ -157,6 +159,26 @@ function appContentWebProps(hidden: boolean): Record<string, unknown> {
   } as Record<string, unknown>;
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
 export default function App() {
   const { width, height } = useWindowDimensions();
   const isWide = width >= WIDE_BREAKPOINT;
@@ -171,7 +193,7 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [message, setMessage] = useState('Ready');
   const [opmlModalOpen, setOpmlModalOpen] = useState(false);
-  const [opmlText, setOpmlText] = useState('');
+  const [spotifyResultToken, setSpotifyResultToken] = useState<string>();
   const [analysisConsentOpen, setAnalysisConsentOpen] = useState(false);
   const [analysisConsentGranted, setAnalysisConsentGranted] = useState(false);
   const [apiStatus, setApiStatus] = useState<ApiStatus>('checking');
@@ -210,7 +232,7 @@ export default function App() {
     };
   }, []);
 
-  useModalFocusTrap(opmlModalOpen, 'opml-modal', opmlInputRef, '[aria-label="OPML"]');
+  useModalFocusTrap(opmlModalOpen, 'opml-modal', opmlInputRef, '[aria-label="Import"]');
   useModalFocusTrap(analysisConsentOpen, 'analysis-modal');
   useModalFocusTrap(Boolean(pendingDeleteFeed), 'remove-feed-modal');
 
@@ -243,6 +265,23 @@ export default function App() {
       appContent.inert = false;
     };
   }, [modalOpen]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    const token = url.searchParams.get('spotifyImportToken');
+    if (!token) {
+      return;
+    }
+
+    url.searchParams.delete('spotifyImportToken');
+    window.history.replaceState({}, document.title, url.toString());
+    setSpotifyResultToken(token);
+    setOpmlModalOpen(true);
+  }, []);
 
   const checkApiHealth = async () => {
     setApiStatus('checking');
@@ -346,6 +385,67 @@ export default function App() {
     setSelectedEpisodeId(feed.episodes[0]?.id);
   };
 
+  const importFeedUrls = async (
+    urls: string[],
+    source: string,
+    onProgress?: (progress: ImportProgress) => void,
+  ): Promise<ImportSummary> => {
+    if (!apiReachable) {
+      throw new Error(apiStatus === 'checking' ? 'API health check is still running' : 'API unavailable');
+    }
+
+    const existingUrls = new Set(feeds.map((feed) => feed.feedUrl));
+    const uniqueUrls = [...new Set(urls)].filter((url) => !existingUrls.has(url));
+    if (!uniqueUrls.length) {
+      return { imported: 0, failed: 0, skipped: urls.length };
+    }
+
+    setLoadingFeed(true);
+    setMessage(`Importing ${source}`);
+    onProgress?.({ completed: 0, total: uniqueUrls.length });
+    let completed = 0;
+
+    try {
+      const outcomes = await mapWithConcurrency(uniqueUrls, IMPORT_FETCH_CONCURRENCY, async (url) => {
+        try {
+          return {
+            status: 'fulfilled' as const,
+            feed: await fetchPodcastFeed(url),
+          };
+        } catch {
+          return {
+            status: 'rejected' as const,
+          };
+        } finally {
+          completed += 1;
+          onProgress?.({ completed, total: uniqueUrls.length });
+        }
+      });
+      const importedFeeds = outcomes
+        .filter((outcome): outcome is { status: 'fulfilled'; feed: PodcastFeed } => outcome.status === 'fulfilled')
+        .map((outcome) => outcome.feed);
+      const importedUrls = new Set(importedFeeds.map((feed) => feed.feedUrl));
+      const failed = uniqueUrls.length - importedFeeds.length;
+      const skipped = urls.length - uniqueUrls.length;
+
+      if (!importedFeeds.length && failed > 0) {
+        throw new Error(`No ${source} feeds could be imported`);
+      }
+
+      const nextFeeds = [
+        ...importedFeeds,
+        ...feeds.filter((feed) => !importedUrls.has(feed.feedUrl)),
+      ];
+      await persistFeeds(nextFeeds);
+      setSelectedFeedId(importedFeeds[0]?.id || nextFeeds[0]?.id);
+      setSelectedEpisodeId(importedFeeds[0]?.episodes[0]?.id || nextFeeds[0]?.episodes[0]?.id);
+      setMessage(failed ? `Imported ${importedFeeds.length}; ${failed} failed` : `Imported ${importedFeeds.length}`);
+      return { imported: importedFeeds.length, failed, skipped };
+    } finally {
+      setLoadingFeed(false);
+    }
+  };
+
   const addFeed = async () => {
     const trimmed = feedUrl.trim();
     if (!trimmed) {
@@ -413,45 +513,6 @@ export default function App() {
     const feed = pendingDeleteFeed;
     setPendingDeleteFeed(undefined);
     await removeFeed(feed);
-  };
-
-  const submitOpml = async () => {
-    const trimmed = opmlText.trim();
-    if (!trimmed) {
-      return;
-    }
-
-    if (!apiReachable) {
-      setMessage(apiStatus === 'checking' ? 'API health check is still running' : 'API unavailable');
-      return;
-    }
-
-    setLoadingFeed(true);
-    setMessage('Importing OPML');
-
-    try {
-      const { feeds: importedUrls } = await importOpml(trimmed);
-      const uniqueUrls = importedUrls.filter((url) => !feeds.some((feed) => feed.feedUrl === url)).slice(0, 12);
-      const outcomes = await Promise.allSettled(uniqueUrls.map((url) => fetchPodcastFeed(url)));
-      const importedFeeds = outcomes
-        .filter((outcome): outcome is PromiseFulfilledResult<PodcastFeed> => outcome.status === 'fulfilled')
-        .map((outcome) => outcome.value);
-      const failedCount = outcomes.length - importedFeeds.length;
-      if (!importedFeeds.length && failedCount > 0) {
-        throw new Error('No OPML feeds could be imported');
-      }
-      const nextFeeds = [...importedFeeds, ...feeds];
-      await persistFeeds(nextFeeds);
-      setSelectedFeedId(importedFeeds[0]?.id || nextFeeds[0]?.id);
-      setSelectedEpisodeId(importedFeeds[0]?.episodes[0]?.id || nextFeeds[0]?.episodes[0]?.id);
-      setOpmlModalOpen(false);
-      setOpmlText('');
-      setMessage(failedCount ? `Imported ${importedFeeds.length} feeds; ${failedCount} failed` : `Imported ${importedFeeds.length} feeds`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'OPML import failed');
-    } finally {
-      setLoadingFeed(false);
-    }
   };
 
   const runAnalysis = async () => {
@@ -565,7 +626,7 @@ export default function App() {
                 <Text style={styles.apiPillText}>{apiLabel}</Text>
               </View>
               {apiStatus === 'api-offline' && <IconButton icon={RefreshCw} label="Retry API" onPress={checkApiHealth} variant="secondary" />}
-              <IconButton icon={Upload} label="OPML" onPress={() => setOpmlModalOpen(true)} disabled={serverControlsDisabled} variant="secondary" />
+              <IconButton icon={Upload} label="Import" onPress={() => setOpmlModalOpen(true)} disabled={serverControlsDisabled} variant="secondary" />
             </View>
           </View>
 
@@ -800,43 +861,16 @@ export default function App() {
           </ScrollView>
         </View>
 
-      <Modal
-        {...modalWebProps('OPML Import')}
-        accessibilityLabel="OPML Import"
-        accessibilityViewIsModal
-        animationType="fade"
-        transparent
+      <ImportWizard
         visible={opmlModalOpen}
-        onRequestClose={() => setOpmlModalOpen(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View
-            accessible
-            accessibilityLabel="OPML Import"
-            accessibilityViewIsModal
-            style={styles.modalCard}
-            testID="opml-modal"
-          >
-            <Text style={styles.modalTitle}>OPML Import</Text>
-            <TextInput
-              ref={opmlInputRef}
-              value={opmlText}
-              onChangeText={setOpmlText}
-              accessibilityLabel="OPML document"
-              multiline
-              textAlignVertical="top"
-              autoCapitalize="none"
-              placeholder="<opml>...</opml>"
-              placeholderTextColor="#5F6B63"
-              style={styles.opmlInput}
-            />
-            <View style={styles.modalActions}>
-              <IconButton icon={X} label="Cancel" onPress={() => setOpmlModalOpen(false)} variant="ghost" />
-              <IconButton icon={Upload} label="Import" onPress={submitOpml} disabled={!opmlText.trim() || loadingFeed} variant="primary" />
-            </View>
-          </View>
-        </View>
-      </Modal>
+        apiReachable={apiReachable}
+        busy={loadingFeed}
+        initialFocusRef={opmlInputRef}
+        spotifyResultToken={spotifyResultToken}
+        onClearSpotifyResultToken={() => setSpotifyResultToken(undefined)}
+        onClose={() => setOpmlModalOpen(false)}
+        onImportFeedUrls={importFeedUrls}
+      />
 
       <Modal
         {...modalWebProps('Analyze Episode', 'analysis-description')}

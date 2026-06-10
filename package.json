@@ -45,7 +45,8 @@
     "web": "expo start --web",
     "export:web": "expo export --platform web --clear",
     "export:pages": "npm run export:web && node scripts/prepare-github-pages.mjs",
-    "test:phone-pages": "playwright test tests/phone-smoke.spec.ts --browser=chromium --reporter=line"
+    "test:phone-pages": "playwright test tests/phone-smoke.spec.ts --browser=chromium --reporter=line",
+    "test:import-phone-pages": "playwright test tests/import-phone.spec.ts --browser=chromium --reporter=line"
   },
   "private": true
 }

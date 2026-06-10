@@ -35,6 +35,26 @@ export type PodcastFeed = {
   episodes: PodcastEpisode[];
 };
 
+export type SpotifyImportShow = {
+  title: string;
+  publisher?: string;
+  spotifyUrl?: string;
+  imageUrl?: string;
+};
+
+export type ImportFeedCandidate = {
+  id: string;
+  source: 'spotify';
+  status: 'matched' | 'needs_review' | 'unavailable';
+  title: string;
+  publisher?: string;
+  feedUrl?: string;
+  artworkUrl?: string;
+  confidence: number;
+  reason: string;
+  externalUrl?: string;
+};
+
 export type AnalysisResult = {
   episodeId: string;
   engine: 'openai-transcript' | 'unavailable';

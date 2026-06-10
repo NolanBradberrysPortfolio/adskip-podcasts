@@ -18,7 +18,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import ipaddr from 'ipaddr.js';
 import { z } from 'zod';
-import type { AdSegment, AnalysisResult, PodcastEpisode, PodcastFeed, SegmentCategory } from '../src/types';
+import type { AdSegment, AnalysisResult, ImportFeedCandidate, PodcastEpisode, PodcastFeed, SegmentCategory, SpotifyImportShow } from '../src/types';
 
 const PORT = readPositiveInteger('PORT', 4300);
 const MAX_AUDIO_BYTES = readPositiveInteger('MAX_TRANSCRIPTION_AUDIO_MB', 24) * 1024 * 1024;
@@ -41,6 +41,10 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const ALLOW_UNAUTHENTICATED_ANALYZE = process.env.ALLOW_UNAUTHENTICATED_ANALYZE === 'true';
 const ALLOW_ANY_CORS_ORIGIN = process.env.ALLOW_ANY_CORS_ORIGIN === 'true';
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
+const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID?.trim();
+const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET?.trim();
+const SPOTIFY_REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI?.trim();
+const SPOTIFY_IMPORT_MAX_SHOWS = readPositiveInteger('SPOTIFY_IMPORT_MAX_SHOWS', 100);
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin: string) => origin.trim())
@@ -50,6 +54,7 @@ const LOCAL_DEV_ORIGINS = ['http://localhost:8081', 'http://127.0.0.1:8081'];
 const HAS_EXPLICIT_CORS = CORS_ORIGINS.length > 0;
 const ALLOW_PERMISSIVE_CORS = !HAS_EXPLICIT_CORS && ALLOW_ANY_CORS_ORIGIN;
 const ALLOWED_CORS_ORIGINS = [...CORS_ORIGINS, GITHUB_PAGES_ORIGIN, ...LOCAL_DEV_ORIGINS];
+const SPOTIFY_IMPORT_CONFIGURED = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REDIRECT_URI);
 
 if (IS_PRODUCTION && !HAS_EXPLICIT_CORS) {
   throw new Error('CORS_ORIGINS must be set in production.');
@@ -176,6 +181,44 @@ const opmlSchema = z.object({
   opml: z.string().min(1),
 });
 
+const spotifyShowSchema = z.object({
+  title: z.string().min(1).max(180),
+  publisher: z.string().max(180).optional(),
+  spotifyUrl: z.string().url().optional(),
+  imageUrl: z.string().url().optional(),
+});
+
+const spotifyMatchSchema = z.object({
+  shows: z.array(spotifyShowSchema).min(1).max(SPOTIFY_IMPORT_MAX_SHOWS),
+});
+
+type SpotifyImportSession = {
+  codeVerifier: string;
+  expiresAt: number;
+  returnTo: string;
+};
+
+type SpotifyImportResult = {
+  expiresAt: number;
+  matches: ImportFeedCandidate[];
+  total: number;
+};
+
+type ItunesSearchResult = {
+  collectionName?: string;
+  artistName?: string;
+  feedUrl?: string;
+  artworkUrl100?: string;
+  collectionViewUrl?: string;
+};
+
+type ItunesSearchResponse = {
+  results?: ItunesSearchResult[];
+};
+
+const spotifyImportSessions = new Map<string, SpotifyImportSession>();
+const spotifyImportResults = new Map<string, SpotifyImportResult>();
+
 const app = express();
 app.use(applyCors);
 app.use(rateLimit);
@@ -226,6 +269,103 @@ app.post('/api/opml', async (request, response) => {
     response.json({ feeds, rejected });
   } catch (error) {
     response.status(400).json({ error: error instanceof Error ? error.message : 'OPML could not be parsed' });
+  }
+});
+
+app.get('/api/import/spotify/status', (_request, response) => {
+  response.json({ configured: SPOTIFY_IMPORT_CONFIGURED });
+});
+
+app.get('/api/import/spotify/start', (request, response) => {
+  if (!SPOTIFY_IMPORT_CONFIGURED) {
+    response.status(503).json({ error: 'Spotify import is not configured on this API server' });
+    return;
+  }
+
+  const returnTo = String(request.query.returnTo || '');
+  const safeReturnTo = validateSpotifyReturnTo(returnTo);
+  if (!safeReturnTo) {
+    response.status(400).json({ error: 'Invalid Spotify return URL' });
+    return;
+  }
+
+  const state = randomUUID();
+  const codeVerifier = base64Url(randomUUID() + randomUUID());
+  const codeChallenge = base64Url(createHash('sha256').update(codeVerifier).digest());
+  spotifyImportSessions.set(state, {
+    codeVerifier,
+    expiresAt: Date.now() + 10 * 60_000,
+    returnTo: safeReturnTo,
+  });
+
+  const authorizeUrl = new URL('https://accounts.spotify.com/authorize');
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('client_id', SPOTIFY_CLIENT_ID!);
+  authorizeUrl.searchParams.set('scope', 'user-library-read');
+  authorizeUrl.searchParams.set('redirect_uri', SPOTIFY_REDIRECT_URI!);
+  authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+  response.redirect(authorizeUrl.toString());
+});
+
+app.get('/api/import/spotify/callback', async (request, response) => {
+  const state = String(request.query.state || '');
+  const code = String(request.query.code || '');
+  const session = spotifyImportSessions.get(state);
+  spotifyImportSessions.delete(state);
+
+  if (!SPOTIFY_IMPORT_CONFIGURED || !session || session.expiresAt < Date.now() || !code) {
+    response.status(400).send('Spotify import session expired or is invalid.');
+    return;
+  }
+
+  try {
+    const accessToken = await exchangeSpotifyCode(code, session.codeVerifier);
+    const shows = await fetchSpotifySavedShows(accessToken);
+    const matches = await matchShowsToFeedCandidates(shows);
+    const token = randomUUID();
+    spotifyImportResults.set(token, {
+      expiresAt: Date.now() + 10 * 60_000,
+      matches,
+      total: shows.length,
+    });
+
+    const returnUrl = new URL(session.returnTo);
+    returnUrl.searchParams.set('spotifyImportToken', token);
+    response.redirect(returnUrl.toString());
+  } catch (error) {
+    response.status(502).send(error instanceof Error ? error.message : 'Spotify import failed.');
+  }
+});
+
+app.get('/api/import/spotify/result/:token', (request, response) => {
+  const token = String(request.params.token || '');
+  const result = spotifyImportResults.get(token);
+
+  if (!result || result.expiresAt < Date.now()) {
+    spotifyImportResults.delete(token);
+    response.status(404).json({ error: 'Spotify import result expired' });
+    return;
+  }
+
+  spotifyImportResults.delete(token);
+  response.json({ matches: result.matches, total: result.total });
+});
+
+app.post('/api/import/spotify/match', async (request, response) => {
+  const parsed = spotifyMatchSchema.safeParse(request.body);
+
+  if (!parsed.success) {
+    response.status(400).json({ error: 'Invalid Spotify show list' });
+    return;
+  }
+
+  try {
+    const matches = await matchShowsToFeedCandidates(parsed.data.shows);
+    response.json({ matches, total: parsed.data.shows.length });
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : 'Spotify matching failed' });
   }
 });
 
@@ -871,6 +1011,244 @@ function unavailableAnalysis(episode: z.infer<typeof analyzeSchema>, reason: str
     message: reason,
     segments: [],
   };
+}
+
+function validateSpotifyReturnTo(returnTo: string): string | undefined {
+  try {
+    const url = new URL(returnTo);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return undefined;
+    }
+
+    const allowedOrigins = new Set(ALLOWED_CORS_ORIGINS);
+    return allowedOrigins.has(url.origin) ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function base64Url(input: string | Buffer): string {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+async function exchangeSpotifyCode(code: string, codeVerifier: string): Promise<string> {
+  const body = new URLSearchParams({
+    code,
+    code_verifier: codeVerifier,
+    grant_type: 'authorization_code',
+    redirect_uri: SPOTIFY_REDIRECT_URI!,
+  });
+
+  const response = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+  const payload = await response.json().catch(() => null) as { access_token?: string; error_description?: string } | null;
+
+  if (!response.ok || !payload?.access_token) {
+    throw new Error(payload?.error_description || 'Spotify token exchange failed');
+  }
+
+  return payload.access_token;
+}
+
+async function fetchSpotifySavedShows(accessToken: string): Promise<SpotifyImportShow[]> {
+  const shows: SpotifyImportShow[] = [];
+  let offset = 0;
+
+  while (shows.length < SPOTIFY_IMPORT_MAX_SHOWS) {
+    const url = new URL('https://api.spotify.com/v1/me/shows');
+    url.searchParams.set('limit', String(Math.min(50, SPOTIFY_IMPORT_MAX_SHOWS - shows.length)));
+    url.searchParams.set('offset', String(offset));
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+    });
+    const payload = await response.json().catch(() => null) as {
+      items?: Array<{
+        show?: {
+          name?: string;
+          publisher?: string;
+          external_urls?: { spotify?: string };
+          images?: Array<{ url?: string }>;
+        };
+      }>;
+      next?: string | null;
+      error?: { message?: string };
+    } | null;
+
+    if (!response.ok) {
+      throw new Error(payload?.error?.message || `Spotify saved shows failed with ${response.status}`);
+    }
+
+    const items = payload?.items || [];
+    shows.push(...items
+      .map((item) => item.show)
+      .filter((show): show is NonNullable<typeof show> => Boolean(show?.name))
+      .map((show) => ({
+        title: show.name!,
+        publisher: show.publisher,
+        spotifyUrl: show.external_urls?.spotify,
+        imageUrl: show.images?.[0]?.url,
+      })));
+
+    if (!payload?.next || items.length === 0) {
+      break;
+    }
+
+    offset += items.length;
+  }
+
+  return shows;
+}
+
+async function matchShowsToFeedCandidates(shows: SpotifyImportShow[]): Promise<ImportFeedCandidate[]> {
+  const normalizedShows = shows
+    .map((show) => ({
+      ...show,
+      title: cleanText(show.title),
+      publisher: cleanText(show.publisher),
+    }))
+    .filter((show) => show.title)
+    .slice(0, SPOTIFY_IMPORT_MAX_SHOWS);
+
+  return mapWithConcurrency(normalizedShows, Math.min(4, OPML_VALIDATE_CONCURRENCY), async (show) => {
+    const result = await searchPodcastDirectory(show).catch(() => undefined);
+    if (!result?.feedUrl) {
+      return {
+        id: stableId(`spotify:${show.title}:${show.publisher || ''}:unavailable`),
+        source: 'spotify',
+        status: 'unavailable',
+        title: show.title,
+        publisher: show.publisher,
+        artworkUrl: show.imageUrl,
+        confidence: 0,
+        reason: 'No public RSS match found',
+        externalUrl: show.spotifyUrl,
+      };
+    }
+
+    const confidence = scorePodcastMatch(show, result);
+    const safeFeedUrl = await validatePublicHttpUrl(result.feedUrl).catch(() => undefined);
+    if (!safeFeedUrl) {
+      return {
+        id: stableId(`spotify:${show.title}:${show.publisher || ''}:unsafe`),
+        source: 'spotify',
+        status: 'unavailable',
+        title: result.collectionName || show.title,
+        publisher: result.artistName || show.publisher,
+        artworkUrl: result.artworkUrl100 || show.imageUrl,
+        confidence,
+        reason: 'Matched feed URL could not be safely imported',
+        externalUrl: result.collectionViewUrl || show.spotifyUrl,
+      };
+    }
+
+    return {
+      id: stableId(`spotify:${show.title}:${safeFeedUrl}`),
+      source: 'spotify',
+      status: confidence >= 0.76 ? 'matched' : 'needs_review',
+      title: result.collectionName || show.title,
+      publisher: result.artistName || show.publisher,
+      feedUrl: safeFeedUrl,
+      artworkUrl: result.artworkUrl100 || show.imageUrl,
+      confidence,
+      reason: confidence >= 0.76 ? 'Strong title and publisher match' : 'Review this public RSS match before importing',
+      externalUrl: result.collectionViewUrl || show.spotifyUrl,
+    };
+  });
+}
+
+async function searchPodcastDirectory(show: SpotifyImportShow): Promise<ItunesSearchResult | undefined> {
+  const term = [show.title, show.publisher].filter(Boolean).join(' ');
+  const url = new URL('https://itunes.apple.com/search');
+  url.searchParams.set('media', 'podcast');
+  url.searchParams.set('entity', 'podcast');
+  url.searchParams.set('limit', '5');
+  url.searchParams.set('term', term);
+
+  const text = await safeFetchText(url.toString(), 512 * 1024);
+  const payload = JSON.parse(text) as ItunesSearchResponse;
+  const results = (payload.results || []).filter((result) => result.feedUrl);
+  if (!results.length) {
+    return undefined;
+  }
+
+  return results
+    .map((result) => ({ result, score: scorePodcastMatch(show, result) }))
+    .sort((a, b) => b.score - a.score)[0]?.result;
+}
+
+function scorePodcastMatch(show: SpotifyImportShow, result: ItunesSearchResult): number {
+  const showTitle = normalizeMatchText(show.title);
+  const resultTitle = normalizeMatchText(result.collectionName);
+  const showPublisher = normalizeMatchText(show.publisher);
+  const resultPublisher = normalizeMatchText(result.artistName);
+  let score = 0;
+
+  if (showTitle && resultTitle) {
+    if (showTitle === resultTitle) {
+      score += 0.72;
+    } else if (showTitle.includes(resultTitle) || resultTitle.includes(showTitle)) {
+      score += 0.58;
+    } else {
+      const overlap = tokenOverlap(showTitle, resultTitle);
+      score += Math.min(0.48, overlap * 0.6);
+    }
+  }
+
+  if (showPublisher && resultPublisher) {
+    if (showPublisher === resultPublisher) {
+      score += 0.22;
+    } else if (showPublisher.includes(resultPublisher) || resultPublisher.includes(showPublisher)) {
+      score += 0.16;
+    } else {
+      score += Math.min(0.12, tokenOverlap(showPublisher, resultPublisher) * 0.2);
+    }
+  }
+
+  if (result.feedUrl) {
+    score += 0.06;
+  }
+
+  return Math.max(0, Math.min(1, Number(score.toFixed(2))));
+}
+
+function normalizeMatchText(value?: string): string {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function tokenOverlap(left: string, right: string): number {
+  const leftTokens = new Set(left.split(' ').filter((token) => token.length > 2));
+  const rightTokens = new Set(right.split(' ').filter((token) => token.length > 2));
+  if (!leftTokens.size || !rightTokens.size) {
+    return 0;
+  }
+
+  let shared = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) {
+      shared += 1;
+    }
+  }
+
+  return shared / Math.max(leftTokens.size, rightTokens.size);
 }
 
 function extractOpmlFeeds(opml: string): string[] {

@@ -3,11 +3,11 @@ import { ActivityIndicator, Linking, Modal, Platform, Pressable, ScrollView, Sty
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { CheckCircle2, FileText, ListMusic, Music2, Upload, X } from 'lucide-react-native';
-import { fetchSpotifyImportResult, fetchSpotifyImportStatus, importOpml, matchSpotifyShows, spotifyConnectUrl } from '../services/api';
+import { fetchSpotifyImportResult, fetchSpotifyImportStatus, importOpml, matchPodcastShows, spotifyConnectUrl } from '../services/api';
 import type { ImportFeedCandidate, SpotifyImportShow } from '../types';
 import { IconButton } from './IconButton';
 
-type ImportMode = 'apple' | 'opml' | 'spotify';
+export type ImportMode = 'names' | 'apple' | 'opml';
 
 export type ImportProgress = {
   completed: number;
@@ -31,6 +31,7 @@ type Props = {
   visible: boolean;
   apiReachable: boolean;
   busy: boolean;
+  initialMode?: ImportMode;
   initialFocusRef?: RefObject<TextInput | null>;
   spotifyResultToken?: string;
   onClearSpotifyResultToken: (consumed?: boolean) => void;
@@ -51,7 +52,7 @@ function modalWebProps(): Record<string, unknown> {
 }
 
 function importModeLabel(mode: ImportMode): string {
-  return mode === 'apple' ? 'Apple Podcasts' : mode === 'spotify' ? 'Spotify' : 'OPML file';
+  return mode === 'names' ? 'Find by name' : mode === 'apple' ? 'Apple Podcasts' : 'OPML file';
 }
 
 function parseSpotifyShows(text: string): SpotifyImportShow[] {
@@ -127,13 +128,14 @@ export function ImportWizard({
   visible,
   apiReachable,
   busy,
+  initialMode = 'apple',
   initialFocusRef,
   spotifyResultToken,
   onClearSpotifyResultToken,
   onClose,
   onImportFeedUrls,
 }: Props) {
-  const [mode, setMode] = useState<ImportMode>('apple');
+  const [mode, setMode] = useState<ImportMode>(initialMode);
   const [opmlText, setOpmlText] = useState('');
   const [fileName, setFileName] = useState('');
   const [status, setStatus] = useState('');
@@ -168,15 +170,21 @@ export function ImportWizard({
   }, [onClearSpotifyResultToken]);
 
   useEffect(() => {
+    if (visible && !spotifyResultToken) {
+      setMode(initialMode);
+    }
+  }, [initialMode, spotifyResultToken, visible]);
+
+  useEffect(() => {
     if (!visible || !spotifyResultToken) {
       return;
     }
 
     let active = true;
     let loaded = false;
-    setMode('spotify');
+    setMode('names');
     setWorking(true);
-    setStatus('Loading Spotify matches');
+    setStatus('Loading saved show matches');
 
     fetchSpotifyImportResult(spotifyResultToken)
       .then((result) => {
@@ -184,12 +192,12 @@ export function ImportWizard({
           return;
         }
 
-        receiveSpotifyMatches(result.matches, `Matched ${result.matches.length} of ${result.total} Spotify shows`);
+        receiveSpotifyMatches(result.matches, `Matched ${result.matches.length} of ${result.total} saved shows`);
         loaded = true;
       })
       .catch((error) => {
         if (active) {
-          setStatus(error instanceof Error ? error.message : 'Spotify import result failed');
+          setStatus(error instanceof Error ? error.message : 'Saved show import result failed');
         }
       })
       .finally(() => {
@@ -320,18 +328,18 @@ export function ImportWizard({
   const matchShows = async () => {
     const shows = parseSpotifyShows(spotifyShowsText).slice(0, 100);
     if (!shows.length) {
-      setStatus('Add at least one Spotify show');
+      setStatus('Add at least one podcast name');
       return;
     }
 
     setWorking(true);
-    setStatus('Matching Spotify shows');
+    setStatus('Finding podcast RSS feeds');
 
     try {
-      const result = await matchSpotifyShows(shows);
-      receiveSpotifyMatches(result.matches, `Matched ${result.matches.length} of ${result.total} Spotify shows`);
+      const result = await matchPodcastShows(shows);
+      receiveSpotifyMatches(result.matches, `Found ${result.matches.length} RSS matches from ${result.total} podcasts`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Spotify matching failed');
+      setStatus(error instanceof Error ? error.message : 'Podcast matching failed');
     } finally {
       setWorking(false);
     }
@@ -345,16 +353,16 @@ export function ImportWizard({
 
     setWorking(true);
     setProgress(undefined);
-    setStatus('Importing Spotify matches');
+    setStatus('Saving matched podcasts');
 
     try {
-      const summary = await onImportFeedUrls(selectedSpotifyUrls, 'Spotify', setProgress);
+      const summary = await onImportFeedUrls(selectedSpotifyUrls, 'Podcast names', setProgress);
       setStatus(summary.failed
         ? `Imported ${summary.imported}; ${summary.failed} failed; ${summary.skipped} skipped`
         : `Imported ${summary.imported}; ${summary.skipped} skipped`);
       onClose();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Spotify import failed');
+      setStatus(error instanceof Error ? error.message : 'Podcast import failed');
     } finally {
       setProgress(undefined);
       setWorking(false);
@@ -397,7 +405,7 @@ export function ImportWizard({
           </View>
 
           <View style={styles.modeRow}>
-            {(['apple', 'opml', 'spotify'] as ImportMode[]).map((candidate) => (
+            {(['names', 'apple', 'opml'] as ImportMode[]).map((candidate) => (
               <Pressable
                 key={candidate}
                 accessibilityRole="button"
@@ -442,12 +450,12 @@ export function ImportWizard({
               </>
             )}
 
-            {mode === 'spotify' && (
+            {mode === 'names' && (
               <>
                 <View style={styles.infoRow}>
                   <Music2 size={18} color="#0F766E" />
                   <Text style={styles.infoText}>
-                    Spotify import matches saved shows to public RSS feeds. Spotify-only shows may need manual review.
+                    Type or paste the podcasts you listen to. SkipCast finds public RSS feeds and lets you review matches before saving.
                   </Text>
                 </View>
                 <IconButton
@@ -459,12 +467,12 @@ export function ImportWizard({
                   style={styles.fullButton}
                 />
                 {spotifyConfigured === false && (
-                  <Text style={styles.helperText}>Paste show names below to match Spotify subscriptions without sign-in.</Text>
+                  <Text style={styles.helperText}>Spotify sign-in is not configured yet. Name matching works now.</Text>
                 )}
                 <TextInput
                   value={spotifyShowsText}
                   onChangeText={setSpotifyShowsText}
-                  accessibilityLabel="Spotify saved shows"
+                  accessibilityLabel="Podcast names"
                   multiline
                   textAlignVertical="top"
                   autoCapitalize="none"
@@ -472,7 +480,7 @@ export function ImportWizard({
                   placeholderTextColor="#5F6B63"
                   style={styles.spotifyInput}
                 />
-                <IconButton icon={CheckCircle2} label="Match Spotify shows" onPress={matchShows} disabled={disabled || !spotifyShowsText.trim()} variant="primary" style={styles.fullButton} />
+                <IconButton icon={CheckCircle2} label="Find RSS feeds" onPress={matchShows} disabled={disabled || !spotifyShowsText.trim()} variant="primary" style={styles.fullButton} />
                 {spotifyMatches.length > 0 && (
                   <View style={styles.matchList}>
                     {spotifyMatches.map((match) => {
@@ -500,7 +508,7 @@ export function ImportWizard({
                   </View>
                 )}
                 {spotifyMatches.length > 0 && (
-                  <IconButton icon={Upload} label="Import selected Spotify matches" onPress={importSpotifyMatches} disabled={disabled || !selectedSpotifyUrls.length} variant="primary" style={styles.fullButton} />
+                  <IconButton icon={Upload} label="Save selected podcasts" onPress={importSpotifyMatches} disabled={disabled || !selectedSpotifyUrls.length} variant="primary" style={styles.fullButton} />
                 )}
               </>
             )}

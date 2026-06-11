@@ -61,7 +61,7 @@ export function fetchSpotifyImportStatus(): Promise<{ configured: boolean }> {
   return requestJson<{ configured: boolean }>('/api/import/spotify/status');
 }
 
-export function matchSpotifyShows(shows: SpotifyImportShow[]): Promise<{ matches: ImportFeedCandidate[]; total: number }> {
+export function matchPodcastShows(shows: SpotifyImportShow[]): Promise<{ matches: ImportFeedCandidate[]; total: number }> {
   return requestJson<{ matches: ImportFeedCandidate[]; total: number }>('/api/import/spotify/match', {
     method: 'POST',
     body: JSON.stringify({ shows }),

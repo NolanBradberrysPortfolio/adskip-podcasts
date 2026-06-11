@@ -50,17 +50,18 @@ for (const width of [390, 430]) {
       await expectNoHorizontalOverflow(page);
     });
 
-    test('matches Spotify saved shows to public RSS and imports selected matches', async ({ page }) => {
-      await page.goto(`${pageBaseUrl}?importPhone=${width}-spotify-${Date.now()}`, { waitUntil: 'networkidle' });
+    test('starts from the top shortcut and saves podcasts by name', async ({ page }) => {
+      await page.goto(`${pageBaseUrl}?importPhone=${width}-name-shortcut-${Date.now()}`, { waitUntil: 'networkidle' });
       await expect(page.getByText('RSS ready')).toBeVisible();
 
-      await page.getByRole('button', { name: 'Import' }).click();
-      await page.getByRole('button', { name: 'Spotify' }).click();
-      await page.getByLabel('Spotify saved shows').fill('Up First | NPR');
-      await page.getByRole('button', { name: 'Match Spotify shows' }).click();
+      await page.getByRole('button', { name: 'Save podcasts you listen to' }).click();
+      await expect(page.getByRole('dialog', { name: 'Import Podcasts' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Find by name' })).toBeVisible();
+      await page.getByLabel('Podcast names').fill('Up First | NPR');
+      await page.getByRole('button', { name: 'Find RSS feeds' }).click();
 
       await expect(page.getByRole('checkbox', { name: /Up First/i })).toBeVisible({ timeout: 45000 });
-      await page.getByRole('button', { name: 'Import selected Spotify matches' }).click();
+      await page.getByRole('button', { name: 'Save selected podcasts' }).click();
 
       await expect(page.getByText(/Showing 1-12 of \d+ episodes/)).toBeVisible({ timeout: 45000 });
       await expect(page.getByRole('button', { name: /Up First from NPR, 150 episodes/i })).toBeVisible();

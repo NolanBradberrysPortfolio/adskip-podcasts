@@ -21,7 +21,7 @@ import { loadSavedFeeds, loadSavedSegments, saveFeeds, saveSegments } from './sr
 import type { AdSegment, PodcastEpisode, PodcastFeed } from './src/types';
 import { formatDate, formatDuration } from './src/utils/format';
 import { IconButton } from './src/components/IconButton';
-import { ImportWizard, type ImportMetadata, type ImportProgress, type ImportSummary } from './src/components/ImportWizard';
+import { ImportWizard, type ImportMetadata, type ImportMode, type ImportProgress, type ImportSummary } from './src/components/ImportWizard';
 import { PodcastPlayer } from './src/components/PodcastPlayer';
 
 type ApiStatus = 'checking' | 'api-offline' | 'ai-offline' | 'ready';
@@ -248,6 +248,7 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [message, setMessage] = useState('Ready');
   const [opmlModalOpen, setOpmlModalOpen] = useState(false);
+  const [importInitialMode, setImportInitialMode] = useState<ImportMode>('apple');
   const [spotifyResultToken, setSpotifyResultToken] = useState<string>();
   const [analysisConsentOpen, setAnalysisConsentOpen] = useState(false);
   const [analysisConsentGranted, setAnalysisConsentGranted] = useState(false);
@@ -290,6 +291,11 @@ export default function App() {
   useModalFocusTrap(opmlModalOpen, 'opml-modal', opmlInputRef, '[aria-label="Import"]');
   useModalFocusTrap(analysisConsentOpen, 'analysis-modal');
   useModalFocusTrap(Boolean(pendingDeleteFeed), 'remove-feed-modal');
+
+  const openImport = (mode: ImportMode = 'apple') => {
+    setImportInitialMode(mode);
+    setOpmlModalOpen(true);
+  };
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof document === 'undefined') {
@@ -335,7 +341,7 @@ export default function App() {
       }
 
       setSpotifyResultToken(token);
-      setOpmlModalOpen(true);
+      openImport('names');
     };
 
     if (Platform.OS !== 'web') {
@@ -723,9 +729,33 @@ export default function App() {
                 <Text style={styles.apiPillText}>{apiLabel}</Text>
               </View>
               {apiStatus === 'api-offline' && <IconButton icon={RefreshCw} label="Retry API" onPress={checkApiHealth} variant="secondary" />}
-              <IconButton icon={Upload} label="Import" onPress={() => setOpmlModalOpen(true)} disabled={serverControlsDisabled} variant="secondary" />
+              <IconButton icon={Upload} label="Import" onPress={() => openImport('apple')} disabled={serverControlsDisabled} variant="secondary" />
             </View>
           </View>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Save podcasts you listen to"
+            accessibilityHint="Finds public RSS feeds for podcast names and adds them to your library"
+            disabled={serverControlsDisabled}
+            onPress={() => openImport('names')}
+            style={({ pressed }) => [
+              styles.quickImport,
+              pressed && styles.quickImportPressed,
+              serverControlsDisabled && styles.quickImportDisabled,
+            ]}
+          >
+            <View style={styles.quickImportIcon}>
+              <ListMusic size={22} color="#0F766E" />
+            </View>
+            <View style={styles.quickImportCopy}>
+              <Text style={styles.quickImportTitle}>Save podcasts you listen to</Text>
+              <Text style={styles.quickImportText}>Type names and SkipCast finds RSS feeds.</Text>
+            </View>
+            <View style={styles.quickImportAction}>
+              <Text style={styles.quickImportActionText}>Start</Text>
+            </View>
+          </Pressable>
 
           <View style={[styles.feedBar, !isWide && styles.feedBarCompact]}>
             <TextInput
@@ -962,6 +992,7 @@ export default function App() {
         visible={opmlModalOpen}
         apiReachable={apiReachable}
         busy={loadingFeed}
+        initialMode={importInitialMode}
         initialFocusRef={opmlInputRef}
         spotifyResultToken={spotifyResultToken}
         onClearSpotifyResultToken={(consumed) => {
@@ -1115,6 +1146,59 @@ const styles = StyleSheet.create({
   apiPillText: {
     color: '#122620',
     fontSize: 12,
+    fontWeight: '900',
+  },
+  quickImport: {
+    minHeight: 76,
+    borderRadius: 8,
+    backgroundColor: '#122620',
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  quickImportPressed: {
+    opacity: 0.88,
+  },
+  quickImportDisabled: {
+    opacity: 0.58,
+  },
+  quickImportIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 8,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickImportCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 3,
+  },
+  quickImportTitle: {
+    color: '#F8FAF7',
+    fontSize: 17,
+    fontWeight: '900',
+    lineHeight: 22,
+  },
+  quickImportText: {
+    color: '#CFE7DE',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  quickImportAction: {
+    minHeight: 36,
+    borderRadius: 8,
+    backgroundColor: '#F8FAF7',
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickImportActionText: {
+    color: '#122620',
+    fontSize: 13,
     fontWeight: '900',
   },
   feedBar: {

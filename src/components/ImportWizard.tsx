@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { ActivityIndicator, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { CheckCircle2, FileText, ListMusic, Music2, Upload, X } from 'lucide-react-native';
+import { CheckCircle2, FileText, ListMusic, Mic, MicOff, Music2, Upload, X } from 'lucide-react-native';
 import { fetchSpotifyImportResult, fetchSpotifyImportStatus, importOpml, matchPodcastShows, spotifyConnectUrl } from '../services/api';
 import type { ImportFeedCandidate, SpotifyImportShow } from '../types';
 import { IconButton } from './IconButton';
@@ -39,6 +39,44 @@ type Props = {
   onImportFeedUrls: (urls: string[], source: string, onProgress?: (progress: ImportProgress) => void, metadata?: ImportMetadata) => Promise<ImportSummary>;
 };
 
+type SpeechRecognitionAlternativeLike = {
+  transcript: string;
+};
+
+type SpeechRecognitionResultLike = {
+  isFinal?: boolean;
+  length: number;
+  [index: number]: SpeechRecognitionAlternativeLike;
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: SpeechRecognitionResultLike;
+  };
+};
+
+type SpeechRecognitionErrorEventLike = {
+  error?: string;
+  message?: string;
+};
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onstart: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort?: () => void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
 function modalWebProps(): Record<string, unknown> {
   if (Platform.OS !== 'web') {
     return {};
@@ -53,6 +91,35 @@ function modalWebProps(): Record<string, unknown> {
 
 function importModeLabel(mode: ImportMode): string {
   return mode === 'names' ? 'Find by name' : mode === 'apple' ? 'Apple Podcasts' : 'OPML file';
+}
+
+function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | undefined {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') {
+    return undefined;
+  }
+
+  const speechWindow = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+
+  return speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+}
+
+function podcastSpeechErrorMessage(error?: string): string {
+  if (error === 'not-allowed' || error === 'service-not-allowed') {
+    return 'Microphone permission is blocked';
+  }
+
+  if (error === 'no-speech') {
+    return 'No podcast name heard';
+  }
+
+  if (error === 'network') {
+    return 'Voice input network error';
+  }
+
+  return 'Voice input stopped';
 }
 
 function parseSpotifyShows(text: string): SpotifyImportShow[] {
@@ -145,6 +212,8 @@ export function ImportWizard({
   const [spotifyShowsText, setSpotifyShowsText] = useState('');
   const [spotifyMatches, setSpotifyMatches] = useState<ImportFeedCandidate[]>([]);
   const [selectedMatchIds, setSelectedMatchIds] = useState<Set<string>>(new Set());
+  const [listeningForPodcasts, setListeningForPodcasts] = useState(false);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const onClearSpotifyResultTokenRef = useRef(onClearSpotifyResultToken);
   const disabled = busy || working || !apiReachable;
 
@@ -174,6 +243,17 @@ export function ImportWizard({
       setMode(initialMode);
     }
   }, [initialMode, spotifyResultToken, visible]);
+
+  useEffect(() => {
+    if (visible) {
+      return undefined;
+    }
+
+    speechRecognitionRef.current?.abort?.();
+    speechRecognitionRef.current = null;
+    setListeningForPodcasts(false);
+    return undefined;
+  }, [visible]);
 
   useEffect(() => {
     if (!visible || !spotifyResultToken) {
@@ -325,6 +405,90 @@ export function ImportWizard({
     }
   };
 
+  const appendSpokenPodcasts = (transcript: string) => {
+    const spokenText = transcript.trim();
+    if (!spokenText) {
+      return;
+    }
+
+    setSpotifyShowsText((current) => {
+      const separator = current.trim() && !current.endsWith('\n') ? '\n' : '';
+      return `${current}${separator}${spokenText}`;
+    });
+    setStatus('Added spoken podcast name');
+  };
+
+  const stopPodcastVoiceInput = () => {
+    const recognition = speechRecognitionRef.current;
+    if (!recognition) {
+      setListeningForPodcasts(false);
+      return;
+    }
+
+    setStatus('Stopped listening');
+    recognition.stop();
+  };
+
+  const startPodcastVoiceInput = () => {
+    if (listeningForPodcasts) {
+      stopPodcastVoiceInput();
+      return;
+    }
+
+    const Recognition = getSpeechRecognitionConstructor();
+    if (!Recognition) {
+      setStatus('Voice input is not available in this browser');
+      return;
+    }
+
+    const recognition = new Recognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+    recognition.onstart = () => {
+      setListeningForPodcasts(true);
+      setStatus('Listening for podcast names');
+    };
+    recognition.onresult = (event) => {
+      const transcripts: string[] = [];
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (result.isFinal === false) {
+          continue;
+        }
+
+        const transcript = result[0]?.transcript?.trim();
+        if (transcript) {
+          transcripts.push(transcript);
+        }
+      }
+
+      if (transcripts.length) {
+        appendSpokenPodcasts(transcripts.join('\n'));
+      }
+    };
+    recognition.onerror = (event) => {
+      setListeningForPodcasts(false);
+      setStatus(event.message || podcastSpeechErrorMessage(event.error));
+    };
+    recognition.onend = () => {
+      setListeningForPodcasts(false);
+      speechRecognitionRef.current = null;
+    };
+
+    speechRecognitionRef.current = recognition;
+    setListeningForPodcasts(true);
+    setStatus('Listening for podcast names');
+
+    try {
+      recognition.start();
+    } catch (error) {
+      speechRecognitionRef.current = null;
+      setListeningForPodcasts(false);
+      setStatus(error instanceof Error ? error.message : 'Voice input failed to start');
+    }
+  };
+
   const matchShows = async () => {
     const shows = parseSpotifyShows(spotifyShowsText).slice(0, 100);
     if (!shows.length) {
@@ -455,7 +619,7 @@ export function ImportWizard({
                 <View style={styles.infoRow}>
                   <Music2 size={18} color="#0F766E" />
                   <Text style={styles.infoText}>
-                    Type or paste the podcasts you listen to. SkipCast finds public RSS feeds and lets you review matches before saving.
+                    Tap the mic and say the podcasts you listen to. SkipCast finds public RSS feeds and lets you review matches before saving.
                   </Text>
                 </View>
                 <IconButton
@@ -469,17 +633,35 @@ export function ImportWizard({
                 {spotifyConfigured === false && (
                   <Text style={styles.helperText}>Spotify sign-in is not configured yet. Name matching works now.</Text>
                 )}
-                <TextInput
-                  value={spotifyShowsText}
-                  onChangeText={setSpotifyShowsText}
-                  accessibilityLabel="Podcast names"
-                  multiline
-                  textAlignVertical="top"
-                  autoCapitalize="none"
-                  placeholder={'Up First | NPR\nRadiolab | WNYC Studios'}
-                  placeholderTextColor="#5F6B63"
-                  style={styles.spotifyInput}
-                />
+                <View style={[styles.voiceInputFrame, listeningForPodcasts && styles.voiceInputFrameActive]}>
+                  <TextInput
+                    value={spotifyShowsText}
+                    onChangeText={setSpotifyShowsText}
+                    accessibilityLabel="Podcast names"
+                    multiline
+                    textAlignVertical="top"
+                    autoCapitalize="none"
+                    placeholder={'Up First | NPR\nRadiolab | WNYC Studios'}
+                    placeholderTextColor="#5F6B63"
+                    style={[styles.spotifyInput, listeningForPodcasts && styles.spotifyInputActive]}
+                  />
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={listeningForPodcasts ? 'Stop voice input' : 'Start voice input'}
+                    accessibilityState={{ disabled }}
+                    disabled={disabled}
+                    onPress={startPodcastVoiceInput}
+                    hitSlop={8}
+                    style={({ pressed }) => [
+                      styles.voiceButton,
+                      listeningForPodcasts && styles.voiceButtonActive,
+                      pressed && !disabled && styles.voiceButtonPressed,
+                      disabled && styles.voiceButtonDisabled,
+                    ]}
+                  >
+                    {listeningForPodcasts ? <MicOff size={20} color="#F8FAF7" /> : <Mic size={20} color={disabled ? '#4B5563' : '#122620'} />}
+                  </Pressable>
+                </View>
                 <IconButton icon={CheckCircle2} label="Find RSS feeds" onPress={matchShows} disabled={disabled || !spotifyShowsText.trim()} variant="primary" style={styles.fullButton} />
                 {spotifyMatches.length > 0 && (
                   <View style={styles.matchList}>
@@ -634,6 +816,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     padding: 12,
   },
+  voiceInputFrame: {
+    position: 'relative',
+  },
+  voiceInputFrameActive: {
+    shadowColor: '#0F766E',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
   spotifyInput: {
     minHeight: 120,
     borderRadius: 8,
@@ -643,6 +834,36 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     padding: 12,
+    paddingRight: 64,
+  },
+  spotifyInputActive: {
+    borderColor: '#0F766E',
+    backgroundColor: '#F5FBF9',
+  },
+  voiceButton: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CAD3CB',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceButtonActive: {
+    borderColor: '#0F766E',
+    backgroundColor: '#0F766E',
+  },
+  voiceButtonPressed: {
+    opacity: 0.8,
+    transform: [{ translateY: 1 }],
+  },
+  voiceButtonDisabled: {
+    backgroundColor: '#F3F4F6',
+    borderColor: '#D1D5DB',
   },
   matchList: {
     gap: 8,

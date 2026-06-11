@@ -50,14 +50,16 @@ for (const width of [390, 430]) {
       await expectNoHorizontalOverflow(page);
     });
 
-    test('starts from the top shortcut and saves podcasts by name', async ({ page }) => {
+    test('starts from the top shortcut and saves dictated podcasts by name', async ({ page }) => {
+      await installMockVoiceInput(page, 'Up First | NPR');
       await page.goto(`${pageBaseUrl}?importPhone=${width}-name-shortcut-${Date.now()}`, { waitUntil: 'networkidle' });
       await expect(page.getByText('RSS ready')).toBeVisible();
 
       await page.getByRole('button', { name: 'Save podcasts you listen to' }).click();
       await expect(page.getByRole('dialog', { name: 'Import Podcasts' })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Find by name' })).toBeVisible();
-      await page.getByLabel('Podcast names').fill('Up First | NPR');
+      await page.getByRole('button', { name: 'Start voice input' }).click();
+      await expect(page.getByLabel('Podcast names')).toHaveValue('Up First | NPR');
       await page.getByRole('button', { name: 'Find RSS feeds' }).click();
 
       await expect(page.getByRole('checkbox', { name: /Up First/i })).toBeVisible({ timeout: 45000 });
@@ -73,4 +75,43 @@ for (const width of [390, 430]) {
 async function expectNoHorizontalOverflow(page: import('@playwright/test').Page) {
   const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(horizontalOverflow).toBe(false);
+}
+
+async function installMockVoiceInput(page: import('@playwright/test').Page, transcript: string) {
+  await page.addInitScript((spokenText: string) => {
+    class FakeSpeechRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = '';
+      onstart: (() => void) | null = null;
+      onresult: ((event: { resultIndex: number; results: unknown[] }) => void) | null = null;
+      onerror: ((event: { error?: string; message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+
+      start() {
+        this.onstart?.();
+        window.setTimeout(() => {
+          const result = [{ transcript: spokenText }];
+          (result as unknown as { isFinal: boolean }).isFinal = true;
+          this.onresult?.({ resultIndex: 0, results: [result] });
+          this.onend?.();
+        }, 25);
+      }
+
+      stop() {
+        this.onend?.();
+      }
+
+      abort() {
+        this.onend?.();
+      }
+    }
+
+    const speechWindow = window as Window & {
+      SpeechRecognition?: typeof FakeSpeechRecognition;
+      webkitSpeechRecognition?: typeof FakeSpeechRecognition;
+    };
+    speechWindow.SpeechRecognition = FakeSpeechRecognition;
+    speechWindow.webkitSpeechRecognition = FakeSpeechRecognition;
+  }, transcript);
 }

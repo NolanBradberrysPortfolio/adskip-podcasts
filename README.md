@@ -78,9 +78,24 @@ This tunnel setup is for testing. If the tunnel restarts, the backend URL change
 
 ## AI Analysis
 
-If `OPENAI_API_KEY` is set, `/api/analyze` downloads audio files under `MAX_TRANSCRIPTION_AUDIO_MB`, transcribes them with `OPENAI_TRANSCRIBE_MODEL`, and creates skip segments from timestamped transcript cues.
+If `OPENAI_API_KEY` is set, `/api/analyze` downloads audio files under `MAX_TRANSCRIPTION_AUDIO_MB`, transcribes them with `OPENAI_TRANSCRIBE_MODEL`, then uses `OPENAI_AD_DETECTION_MODEL` to classify timestamped transcript windows into ad ranges. The default setup keeps `whisper-1` for timestamped transcription and uses `gpt-4o-mini` for the small ad-detection pass.
 
 If no key is set or the episode audio is too large, the API returns `unavailable` with no skip segments. The app does not auto-skip fake timestamps.
+
+Use an OpenAI Platform API key on the private API server:
+
+```powershell
+$env:CORS_ORIGINS="https://nolanbradberrysportfolio.github.io"
+$env:OPENAI_API_KEY="sk-..."
+$env:ANALYZE_API_TOKEN="choose-a-private-random-token"
+$env:OPENAI_TRANSCRIBE_MODEL="whisper-1"
+$env:OPENAI_AD_DETECTION_MODEL="gpt-4o-mini"
+npm run server:start
+```
+
+For GitHub Pages builds that should call a token-protected analyzer, also set `EXPO_PUBLIC_ANALYZE_API_TOKEN` in the Pages build environment to the same token. Do not commit real keys or tokens.
+
+ChatGPT Plus/Pro is not enough for this backend by itself. OpenAI API usage is billed separately from ChatGPT subscriptions, so the backend needs a Platform API key with API billing enabled.
 
 The app stores timestamp metadata and seeks over ranges during foreground playback. It does not redistribute edited copies of podcast audio.
 

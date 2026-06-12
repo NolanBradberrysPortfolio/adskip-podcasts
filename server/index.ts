@@ -41,6 +41,9 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const ALLOW_UNAUTHENTICATED_ANALYZE = process.env.ALLOW_UNAUTHENTICATED_ANALYZE === 'true';
 const ALLOW_ANY_CORS_ORIGIN = process.env.ALLOW_ANY_CORS_ORIGIN === 'true';
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
+const OPENAI_AD_DETECTION_MODEL = process.env.OPENAI_AD_DETECTION_MODEL || 'gpt-4o-mini';
+const AD_DETECTION_WINDOW_SECONDS = readPositiveInteger('AD_DETECTION_WINDOW_SECONDS', 12 * 60);
+const AD_DETECTION_MAX_WINDOWS = readPositiveInteger('AD_DETECTION_MAX_WINDOWS', 8);
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID?.trim();
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET?.trim();
 const SPOTIFY_REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI?.trim();
@@ -157,6 +160,22 @@ type TranscriptSegment = {
   text: string;
 };
 
+const AD_SEGMENT_CATEGORIES = ['host_read_ad', 'dynamic_ad', 'network_promo', 'self_promo', 'intro', 'outro'] as const satisfies readonly SegmentCategory[];
+
+const aiAdCandidateSchema = z.object({
+  start: z.number(),
+  end: z.number(),
+  category: z.enum(AD_SEGMENT_CATEGORIES).default('host_read_ad'),
+  confidence: z.number().min(0).max(1).optional(),
+  reason: z.string().max(220).optional(),
+});
+
+const aiAdDetectionSchema = z.object({
+  segments: z.array(aiAdCandidateSchema).max(24),
+});
+
+type AiAdCandidate = z.infer<typeof aiAdCandidateSchema>;
+
 type SafeHttpResponse = {
   body: IncomingMessage;
   headers: IncomingHttpHeaders;
@@ -239,6 +258,8 @@ app.get('/api/health', (_request, response) => {
   response.json({
     ok: true,
     openai: HAS_OPENAI_KEY,
+    transcribeModel: OPENAI_TRANSCRIBE_MODEL,
+    adDetectionModel: HAS_OPENAI_KEY ? OPENAI_AD_DETECTION_MODEL : undefined,
     maxTranscriptionAudioMb: Math.round(MAX_AUDIO_BYTES / 1024 / 1024),
   });
 });
@@ -922,13 +943,20 @@ async function analyzePodcastEpisode(episode: z.infer<typeof analyzeSchema>): Pr
   try {
     await downloadAudio(safeAudioUrl, tempPath, MAX_AUDIO_BYTES);
     const transcript = await transcribeWithOpenAI(tempPath);
-    const segments = detectAdsFromTranscript(episode.episodeId, transcript);
+    const modelSegments = await detectAdsWithOpenAI(episode, transcript).catch((error) => {
+      console.warn('OpenAI ad model detection failed; falling back to transcript cues', error);
+      return [] as AdSegment[];
+    });
+    const fallbackSegments = detectAdsFromTranscript(episode.episodeId, transcript);
+    const segments = modelSegments.length ? modelSegments : fallbackSegments;
 
     return {
       episodeId: episode.episodeId,
-      engine: 'openai-transcript',
+      engine: modelSegments.length ? 'openai-ad-model' : 'openai-transcript',
       status: 'complete',
-      message: segments.length ? `Found ${segments.length} likely ad segments` : 'No high-confidence ad segments found',
+      message: segments.length
+        ? `Found ${segments.length} likely ad ${segments.length === 1 ? 'segment' : 'segments'}`
+        : 'No high-confidence ad segments found',
       segments,
     };
   } finally {
@@ -963,6 +991,130 @@ async function transcribeWithOpenAI(filePath: string): Promise<TranscriptSegment
       text: String(segment.text || ''),
     }))
     .filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
+}
+
+async function detectAdsWithOpenAI(episode: z.infer<typeof analyzeSchema>, transcript: TranscriptSegment[]): Promise<AdSegment[]> {
+  if (!transcript.length) {
+    return [];
+  }
+
+  const client = new OpenAI();
+  const windows = transcriptWindows(transcript, AD_DETECTION_WINDOW_SECONDS).slice(0, AD_DETECTION_MAX_WINDOWS);
+  const candidates: AiAdCandidate[] = [];
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const windowSegments = windows[index];
+    const windowCandidates = await classifyAdWindow(client, episode, windowSegments, index + 1, windows.length);
+    candidates.push(...windowCandidates);
+  }
+
+  return mergeCloseSegments(
+    candidates
+      .map((candidate, index) => toModelAdSegment(episode.episodeId, index, candidate))
+      .filter((segment): segment is AdSegment => Boolean(segment)),
+  );
+}
+
+function transcriptWindows(transcript: TranscriptSegment[], windowSeconds: number): TranscriptSegment[][] {
+  const windows: TranscriptSegment[][] = [];
+  let current: TranscriptSegment[] = [];
+  let windowStart = transcript[0]?.start || 0;
+
+  for (const segment of transcript) {
+    if (current.length && segment.start - windowStart >= windowSeconds) {
+      windows.push(current);
+      current = [];
+      windowStart = segment.start;
+    }
+
+    current.push(segment);
+  }
+
+  if (current.length) {
+    windows.push(current);
+  }
+
+  return windows;
+}
+
+async function classifyAdWindow(
+  client: OpenAI,
+  episode: z.infer<typeof analyzeSchema>,
+  transcript: TranscriptSegment[],
+  windowIndex: number,
+  windowCount: number,
+): Promise<AiAdCandidate[]> {
+  const transcriptText = transcript
+    .map((segment) => `[${segment.start.toFixed(1)}-${segment.end.toFixed(1)}] ${segment.text.trim()}`)
+    .join('\n')
+    .slice(0, 60_000);
+
+  const completion = await client.chat.completions.create({
+    model: OPENAI_AD_DETECTION_MODEL,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You detect podcast advertising timestamp ranges from timestamped transcripts.',
+          'Return only JSON with a "segments" array.',
+          'Each segment must include start, end, category, confidence, and reason.',
+          'Use only timestamps present in the transcript. Do not invent ranges.',
+          'Include sponsor reads, inserted ad breaks, promo codes, commercial breaks, network promos, and paid self-promotion.',
+          'Exclude normal editorial discussion, jokes, news, and guest conversation unless it is clearly advertising.',
+          'If uncertain, omit the segment.',
+        ].join(' '),
+      },
+      {
+        role: 'user',
+        content: [
+          `Podcast: ${episode.podcastTitle}`,
+          `Episode: ${episode.title}`,
+          `Window: ${windowIndex} of ${windowCount}`,
+          '',
+          'Return JSON like:',
+          '{"segments":[{"start":12.3,"end":74.8,"category":"host_read_ad","confidence":0.83,"reason":"Sponsor read with promo code"}]}',
+          '',
+          'Allowed categories: host_read_ad, dynamic_ad, network_promo, self_promo.',
+          '',
+          transcriptText,
+        ].join('\n'),
+      },
+    ],
+  });
+
+  try {
+    const content = completion.choices[0]?.message?.content || '{"segments":[]}';
+    const parsed = aiAdDetectionSchema.safeParse(JSON.parse(content));
+    return parsed.success ? parsed.data.segments : [];
+  } catch {
+    return [];
+  }
+}
+
+function toModelAdSegment(episodeId: string, index: number, candidate: AiAdCandidate): AdSegment | undefined {
+  const start = Math.max(0, candidate.start - 0.5);
+  const end = Math.max(start, candidate.end + 0.5);
+  const duration = end - start;
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || duration < 6 || duration > 480) {
+    return undefined;
+  }
+
+  const confidence = Math.max(0.55, Math.min(0.97, candidate.confidence ?? 0.72));
+  const category = candidate.category === 'intro' || candidate.category === 'outro' ? 'self_promo' : candidate.category;
+
+  return {
+    id: stableId(`${episodeId}:ad-model:${index}:${start}:${end}`),
+    start: Number(start.toFixed(2)),
+    end: Number(end.toFixed(2)),
+    category,
+    confidence,
+    label: labelFor(category),
+    source: 'openai-ad-model',
+    reason: candidate.reason || `Detected by ${OPENAI_AD_DETECTION_MODEL}.`,
+  };
 }
 
 function detectAdsFromTranscript(episodeId: string, transcript: TranscriptSegment[]): AdSegment[] {

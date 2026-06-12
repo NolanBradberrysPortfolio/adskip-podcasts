@@ -201,6 +201,9 @@ export function PodcastPlayer({
       artist: episode.podcastTitle,
       artworkUrl: episode.artworkUrl,
     });
+    if (canAnalyze && !hasSkipSegments && !analyzing) {
+      onAnalyze();
+    }
     player.play();
   };
 

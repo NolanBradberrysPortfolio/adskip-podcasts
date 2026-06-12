@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { ActivityIndicator, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { CheckCircle2, FileText, ListMusic, Mic, MicOff, Music2, Upload, X } from 'lucide-react-native';
+import { CheckCircle2, FileText, ListMusic, Mic, Music2, Upload, X } from 'lucide-react-native';
 import { fetchSpotifyImportResult, fetchSpotifyImportStatus, importOpml, matchPodcastShows, spotifyConnectUrl } from '../services/api';
 import type { ImportFeedCandidate, SpotifyImportShow } from '../types';
 import { IconButton } from './IconButton';
@@ -659,7 +659,7 @@ export function ImportWizard({
                       disabled && styles.voiceButtonDisabled,
                     ]}
                   >
-                    {listeningForPodcasts ? <MicOff size={20} color="#F8FAF7" /> : <Mic size={20} color={disabled ? '#4B5563' : '#122620'} />}
+                    <Mic size={20} color={disabled ? '#4B5563' : listeningForPodcasts ? '#F8FAF7' : '#122620'} />
                   </Pressable>
                 </View>
                 <IconButton icon={CheckCircle2} label="Find RSS feeds" onPress={matchShows} disabled={disabled || !spotifyShowsText.trim()} variant="primary" style={styles.fullButton} />

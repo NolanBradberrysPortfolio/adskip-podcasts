@@ -434,14 +434,14 @@ export default function App() {
     apiStatus === 'ready'
       ? 'AI ready'
       : apiStatus === 'ai-offline'
-        ? 'RSS ready'
+        ? 'RSS ready, ads off'
         : apiStatus === 'checking'
           ? 'Checking API'
           : 'API offline';
   const analysisUnavailableLabel =
-    apiStatus === 'api-offline' ? 'API offline' : apiStatus === 'checking' ? 'Checking API' : 'Analysis off';
+    apiStatus === 'api-offline' ? 'API offline' : apiStatus === 'checking' ? 'Checking API' : 'Ad scan off';
   const apiPillStyle =
-    apiStatus === 'ready' || apiStatus === 'ai-offline'
+    apiStatus === 'ready'
       ? styles.apiPillReady
       : apiStatus === 'api-offline'
         ? styles.apiPillError
@@ -721,7 +721,7 @@ export default function App() {
               <View style={[styles.apiPill, apiPillStyle]}>
                 {apiStatus === 'checking' ? (
                   <ActivityIndicator color="#5F6B63" />
-                ) : apiStatus === 'ready' || apiStatus === 'ai-offline' ? (
+                ) : apiStatus === 'ready' ? (
                   <CheckCircle2 size={16} color="#0F766E" />
                 ) : (
                   <AlertTriangle size={16} color={apiStatus === 'api-offline' ? '#991B1B' : '#92400E'} />
@@ -750,7 +750,7 @@ export default function App() {
             </View>
             <View style={styles.quickImportCopy}>
               <Text style={styles.quickImportTitle}>Save podcasts you listen to</Text>
-              <Text style={styles.quickImportText}>Type names and SkipCast finds RSS feeds.</Text>
+              <Text style={styles.quickImportText}>Tap the mic and SkipCast finds RSS feeds.</Text>
             </View>
             <View style={styles.quickImportAction}>
               <Text style={styles.quickImportActionText}>Start</Text>

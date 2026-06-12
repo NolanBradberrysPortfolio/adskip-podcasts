@@ -22,7 +22,7 @@ for (const width of [390, 430]) {
 
     test('imports pasted Apple/OPML subscriptions', async ({ page }) => {
       await page.goto(`${pageBaseUrl}?importPhone=${width}-opml-${Date.now()}`, { waitUntil: 'networkidle' });
-      await expect(page.getByText('RSS ready')).toBeVisible();
+      await expect(page.getByText('RSS ready, ads off')).toBeVisible();
 
       await page.getByRole('button', { name: 'Import' }).click();
       await expect(page.getByRole('dialog', { name: 'Import Podcasts' })).toBeVisible();
@@ -36,7 +36,7 @@ for (const width of [390, 430]) {
 
     test('keeps useful feedback for zero-feed and partial OPML imports', async ({ page }) => {
       await page.goto(`${pageBaseUrl}?importPhone=${width}-opml-feedback-${Date.now()}`, { waitUntil: 'networkidle' });
-      await expect(page.getByText('RSS ready')).toBeVisible();
+      await expect(page.getByText('RSS ready, ads off')).toBeVisible();
 
       await page.getByRole('button', { name: 'Import' }).click();
       await page.getByLabel('OPML document').fill('<?xml version="1.0"?><opml version="2.0"><body></body></opml>');
@@ -53,7 +53,7 @@ for (const width of [390, 430]) {
     test('starts from the top shortcut and saves dictated podcasts by name', async ({ page }) => {
       await installMockVoiceInput(page, 'Up First | NPR');
       await page.goto(`${pageBaseUrl}?importPhone=${width}-name-shortcut-${Date.now()}`, { waitUntil: 'networkidle' });
-      await expect(page.getByText('RSS ready')).toBeVisible();
+      await expect(page.getByText('RSS ready, ads off')).toBeVisible();
 
       await page.getByRole('button', { name: 'Save podcasts you listen to' }).click();
       await expect(page.getByRole('dialog', { name: 'Import Podcasts' })).toBeVisible();

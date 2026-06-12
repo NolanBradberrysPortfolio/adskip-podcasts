@@ -52,24 +52,23 @@ The public web app is deployed to GitHub Pages:
 https://nolanbradberrysportfolio.github.io/adskip-podcasts/
 ```
 
-GitHub Pages is static, so RSS features need the local API exposed through HTTPS. For a temporary phone demo, keep this computer awake and run:
+GitHub Pages is static, so RSS and ad-scan features need the local API exposed through HTTPS. For a temporary phone demo with ad skipping, keep this computer awake, set a private OpenAI Platform API key in PowerShell, then run the launcher:
 
 ```powershell
-$env:CORS_ORIGINS="https://nolanbradberrysportfolio.github.io"
-$env:OPENAI_API_KEY=""
-npm run server:start
+$env:OPENAI_API_KEY="sk-..."
+.\scripts\start-local-ai-backend.ps1
 ```
 
-In another PowerShell window:
+The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it allows unauthenticated analysis but limits analysis to a small number of requests per hour; stop it when you are done:
 
 ```powershell
-.\tools\cloudflared-386.exe tunnel --url http://localhost:4300 --no-autoupdate
+.\scripts\stop-local-ai-backend.ps1
 ```
 
-Copy the printed `https://...trycloudflare.com` URL, then redeploy Pages with:
+To start the tunnel without redeploying Pages automatically:
 
 ```powershell
-gh workflow run pages.yml --repo NolanBradberrysPortfolio/adskip-podcasts --ref main --field api_url="https://YOUR-TUNNEL.trycloudflare.com"
+.\scripts\start-local-ai-backend.ps1 -NoDeploy
 ```
 
 This tunnel setup is for testing. If the tunnel restarts, the backend URL changes and Pages must be redeployed.

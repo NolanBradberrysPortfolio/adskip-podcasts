@@ -24,10 +24,10 @@ if (-not $env:OPENAI_API_KEY) {
     $env:LOCAL_WHISPER_MODEL = "Xenova/whisper-tiny.en"
   }
   if (-not $env:LOCAL_WHISPER_MAX_AUDIO_MB) {
-    $env:LOCAL_WHISPER_MAX_AUDIO_MB = "120"
+    $env:LOCAL_WHISPER_MAX_AUDIO_MB = "20"
   }
   if (-not $env:LOCAL_WHISPER_MAX_SECONDS) {
-    $env:LOCAL_WHISPER_MAX_SECONDS = "1200"
+    $env:LOCAL_WHISPER_MAX_SECONDS = "180"
   }
 }
 
@@ -61,16 +61,12 @@ Set-Location '$root'
 npm run server:start *> '$serverLog'
 "@
 
-$tunnelCommand = @"
-Set-Location '$root'
-& '$cloudflared' tunnel --url 'http://localhost:$Port' --no-autoupdate *> '$tunnelLog'
-"@
-
 Write-Host "Starting SkipCast API on http://localhost:$Port ..."
 $serverProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $serverCommand) -WindowStyle Hidden -PassThru
 
 Write-Host "Starting Cloudflare tunnel ..."
-$tunnelProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $tunnelCommand) -WindowStyle Hidden -PassThru
+$tunnelArgs = "/c ""`"$cloudflared`" tunnel --url http://localhost:$Port --no-autoupdate 1> `"$tunnelLog`" 2>&1"""
+$tunnelProcess = Start-Process -FilePath "cmd.exe" -ArgumentList $tunnelArgs -WindowStyle Hidden -PassThru
 
 $apiUrl = $null
 for ($attempt = 0; $attempt -lt 45; $attempt += 1) {

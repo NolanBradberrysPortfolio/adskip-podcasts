@@ -58,7 +58,7 @@ GitHub Pages is static, so RSS and ad-scan features need the local API exposed t
 .\scripts\start-local-ai-backend.ps1
 ```
 
-If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and uses transcript cues to find likely ad reads. The first local run downloads the Whisper model and local scans are CPU-heavy.
+If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and uses transcript cues to find likely ad reads in the opening scan window. The first local run downloads the Whisper model and local scans are CPU-heavy; the launcher keeps the no-key phone demo to a short opening scan so the Cloudflare tunnel does not time out.
 
 The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it allows unauthenticated analysis but limits analysis to a small number of requests per hour; stop it when you are done:
 

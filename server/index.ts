@@ -71,6 +71,8 @@ const SPOTIFY_MATCH_RATE_LIMIT_MAX_REQUESTS = readPositiveInteger('SPOTIFY_MATCH
 const SPOTIFY_SESSION_MAX_ENTRIES = readPositiveInteger('SPOTIFY_SESSION_MAX_ENTRIES', 500);
 const PODCAST_SEARCH_CACHE_MAX_ENTRIES = readPositiveInteger('PODCAST_SEARCH_CACHE_MAX_ENTRIES', 500);
 const PODCAST_SEARCH_CACHE_TTL_MS = readPositiveInteger('PODCAST_SEARCH_CACHE_TTL_MS', 10 * 60_000);
+const MAX_PUBLIC_TRANSCRIPT_BYTES = readPositiveInteger('MAX_PUBLIC_TRANSCRIPT_MB', 8) * 1024 * 1024;
+const POD_SAVE_AMERICA_SPREAKER_FEED_URL = 'https://www.spreaker.com/show/6160204/episodes/feed';
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin: string) => origin.trim())
@@ -1227,6 +1229,32 @@ async function normalizeEpisode(
 }
 
 async function analyzePodcastEpisode(episode: z.infer<typeof analyzeSchema>): Promise<AnalysisResult> {
+  const publicTranscript = await findPublicTranscript(episode).catch((error) => {
+    console.warn('Public transcript lookup failed; falling back to audio analysis', error);
+    return [] as TranscriptSegment[];
+  });
+
+  if (publicTranscript.length) {
+    const fallbackSegments = detectAdsFromPublicTranscript(episode.episodeId, publicTranscript);
+    const modelSegments = fallbackSegments.length < 2 && LOCAL_CODEX_AD_DETECTION
+      ? await detectAdsWithCodex(episode, publicTranscript).catch((error) => {
+          console.warn('Codex public transcript detection failed; falling back to transcript cues', error);
+          return [] as AdSegment[];
+        })
+      : [];
+    const segments = modelSegments.length ? modelSegments : fallbackSegments;
+
+    return {
+      episodeId: episode.episodeId,
+      engine: modelSegments.length ? 'codex-ad-model' : 'public-transcript',
+      status: 'complete',
+      message: segments.length
+        ? `Found ${segments.length} likely ad ${segments.length === 1 ? 'segment' : 'segments'} from public transcript`
+        : 'No high-confidence ad segments found in the public transcript',
+      segments,
+    };
+  }
+
   const engine = chooseAnalysisEngine(episode);
   if (!engine) {
     return unavailableAnalysis(episode, analysisUnavailableReason(episode));
@@ -1496,6 +1524,99 @@ async function detectAdsWithOpenAI(episode: z.infer<typeof analyzeSchema>, trans
   );
 }
 
+async function findPublicTranscript(episode: z.infer<typeof analyzeSchema>): Promise<TranscriptSegment[]> {
+  if (normalizeMatchText(episode.podcastTitle) !== 'pod save america') {
+    return [];
+  }
+
+  const feedUrl = await validatePublicHttpUrl(POD_SAVE_AMERICA_SPREAKER_FEED_URL);
+  const feed = await safeFetchTextWithFinalUrl(feedUrl, MAX_PUBLIC_TRANSCRIPT_BYTES);
+  const item = findSpreakerEpisodeItem(feed.text, episode.title);
+  const transcriptUrl = item ? extractTranscriptUrl(item) : undefined;
+
+  if (!transcriptUrl) {
+    return [];
+  }
+
+  const safeTranscriptUrl = await validatePublicHttpUrl(transcriptUrl);
+  const transcript = await safeFetchTextWithFinalUrl(safeTranscriptUrl, MAX_PUBLIC_TRANSCRIPT_BYTES);
+  return parseSrtTranscript(transcript.text);
+}
+
+function findSpreakerEpisodeItem(feedXml: string, episodeTitle: string): string | undefined {
+  const targetTitle = normalizeMatchText(episodeTitle);
+  const items = feedXml.match(/<item\b[\s\S]*?<\/item>/g) || [];
+
+  return items.find((item) => normalizeMatchText(xmlTagText(item, 'title')) === targetTitle);
+}
+
+function extractTranscriptUrl(itemXml: string): string | undefined {
+  const transcripts = itemXml.match(/<podcast:transcript\b[^>]+>/g) || [];
+  const preferred = transcripts.find((tag) => /application\/x-subrip|\.srt(?:["?]|$)/i.test(tag)) || transcripts[0];
+  const rawUrl = preferred?.match(/\burl="([^"]+)"/i)?.[1];
+  return rawUrl ? decodeXmlEntities(rawUrl) : undefined;
+}
+
+function xmlTagText(xml: string, tag: string): string | undefined {
+  const value = xml.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, 'i'))?.[1]
+    || xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'))?.[1];
+  return value ? decodeXmlEntities(stripHtml(value) || value) : undefined;
+}
+
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function parseSrtTranscript(srt: string): TranscriptSegment[] {
+  const segments: TranscriptSegment[] = [];
+  const blocks = srt.replace(/\r/g, '').split(/\n{2,}/);
+
+  for (const block of blocks) {
+    const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
+    const timeIndex = lines.findIndex((line) => line.includes('-->'));
+
+    if (timeIndex < 0) {
+      continue;
+    }
+
+    const [startRaw, endRaw] = lines[timeIndex].split('-->').map((value) => value.trim());
+    const start = parseSubtitleTimestamp(startRaw);
+    const end = parseSubtitleTimestamp(endRaw);
+    const text = cleanText(lines.slice(timeIndex + 1).join(' ').replace(/^Speaker\s+\d+:\s*/i, ''));
+
+    if (start === undefined || end === undefined || end <= start || !text) {
+      continue;
+    }
+
+    segments.push({
+      start,
+      end,
+      text,
+    });
+  }
+
+  return segments;
+}
+
+function parseSubtitleTimestamp(value: string): number | undefined {
+  const match = value.match(/(?:(\d+):)?(\d{2}):(\d{2})[,.](\d{1,3})/);
+  if (!match) {
+    return undefined;
+  }
+
+  const hours = Number(match[1] || 0);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  const milliseconds = Number(match[4].padEnd(3, '0'));
+
+  return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
+}
+
 async function detectAdsWithCodex(episode: z.infer<typeof analyzeSchema>, transcript: TranscriptSegment[]): Promise<AdSegment[]> {
   if (!transcript.length) {
     return [];
@@ -1690,10 +1811,127 @@ function toModelAdSegment(
   };
 }
 
+function detectAdsFromPublicTranscript(episodeId: string, transcript: TranscriptSegment[]): AdSegment[] {
+  const segments: AdSegment[] = [];
+  let active: {
+    start: number;
+    end: number;
+    hits: number;
+    category: SegmentCategory;
+    sawCallToAction: boolean;
+    lastCueEnd: number;
+  } | null = null;
+  let quietCount = 0;
+
+  for (const line of transcript) {
+    const text = line.text;
+    const score = adScore(text);
+    const startCue = isStrongAdStartCue(text);
+    const callToAction = isAdCallToActionCue(text);
+    const returnCue = isPublicTranscriptReturnCue(text);
+
+    if (!active && (startCue || score >= 2)) {
+      active = {
+        start: Math.max(0, line.start - 0.8),
+        end: line.end,
+        hits: Math.max(score, startCue ? 2 : 1),
+        category: classifyCategory(text),
+        sawCallToAction: callToAction,
+        lastCueEnd: line.end,
+      };
+      quietCount = 0;
+      continue;
+    }
+
+    if (!active) {
+      continue;
+    }
+
+    const elapsed = line.end - active.start;
+
+    if (returnCue && elapsed >= 18) {
+      active.end = score > 0 || callToAction ? line.end : line.start;
+      if (active.end - active.start >= 12) {
+        segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
+      }
+      active = null;
+      quietCount = 0;
+      continue;
+    }
+
+    if (active.sawCallToAction && !score && !startCue && isLikelyEditorialResume(text)) {
+      active.end = line.start;
+      if (active.end - active.start >= 12) {
+        segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
+      }
+      active = null;
+      quietCount = 0;
+      continue;
+    }
+
+    if (active.sawCallToAction && !startCue && isSponsorEditorialBridge(text)) {
+      active.end = line.end;
+      if (active.end - active.start >= 12) {
+        segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
+      }
+      active = null;
+      quietCount = 0;
+      continue;
+    }
+
+    active.end = line.end;
+    active.hits += score + (startCue ? 1 : 0);
+    active.sawCallToAction = startCue ? false : active.sawCallToAction || callToAction;
+    if (score > 0 || startCue || callToAction) {
+      active.lastCueEnd = line.end;
+    }
+    quietCount = score > 0 || startCue || callToAction ? 0 : quietCount + 1;
+
+    const closeAfterQuiet = active.sawCallToAction && quietCount >= 24 && elapsed >= 75 && line.start - active.lastCueEnd >= 8;
+    const closeAfterLongBreak = elapsed >= 300;
+
+    if (closeAfterQuiet || closeAfterLongBreak) {
+      if (active.end - active.start >= 12) {
+        segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
+      }
+      active = null;
+      quietCount = 0;
+    }
+  }
+
+  if (active && active.end - active.start >= 12) {
+    segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
+  }
+
+  return mergeCloseSegments(segments);
+}
+
+function isStrongAdStartCue(text: string): boolean {
+  return /brought to you by|brought you by|america'?s? brought (?:to )?\b|america is brought to\b|^you by\b|sponsored by|support(?:ed)? by|commercial break|ad break/i.test(text);
+}
+
+function isAdCallToActionCue(text: string): boolean {
+  return /promo code|use code|enter (?:promo )?code|dot com|\.com|slash|free shipping|free trial|first month|first week|first order|off your first|checkout|sign up|listeners|no safe like/i.test(text);
+}
+
+function isPublicTranscriptReturnCue(text: string): boolean {
+  return /welcome to pod save america|back to (?:the )?(?:show|episode|conversation)|and we'?re back|now back to|let'?s get back/i.test(text);
+}
+
+function isLikelyEditorialResume(text: string): boolean {
+  return /^(?:well\s+(?:dealer|deal|we|then|there|that)|like there'?s|in terms|on the slush fund|the atlantic|you referred|ron\b|jon\b|tommy\b|dan\b|here'?s\b)/i.test(text)
+    && !isAdCallToActionCue(text)
+    && !isStrongAdStartCue(text);
+}
+
+function isSponsorEditorialBridge(text: string): boolean {
+  return /\bcheckout\s+(?:on|and|that|the|in terms)\b|dot com slash .{0,35}\bwell\b/i.test(text);
+}
+
 function detectAdsFromTranscript(
   episodeId: string,
   transcript: TranscriptSegment[],
-  source: 'openai-transcript' | 'local-whisper-transcript' = 'openai-transcript',
+  source: 'openai-transcript' | 'local-whisper-transcript' | 'public-transcript' = 'openai-transcript',
 ): AdSegment[] {
   const segments: AdSegment[] = [];
   let active: { start: number; end: number; hits: number; category: SegmentCategory } | null = null;
@@ -1783,7 +2021,7 @@ function toAdSegment(
   episodeId: string,
   index: number,
   active: { start: number; end: number; hits: number; category: SegmentCategory },
-  source: 'openai-transcript' | 'local-whisper-transcript' = 'openai-transcript',
+  source: 'openai-transcript' | 'local-whisper-transcript' | 'public-transcript' = 'openai-transcript',
 ): AdSegment {
   const duration = Math.max(1, active.end - active.start);
   const confidence = Math.min(0.95, 0.58 + active.hits * 0.08 + Math.min(duration, 120) / 1000);

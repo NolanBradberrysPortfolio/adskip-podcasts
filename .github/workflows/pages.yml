@@ -39,7 +39,7 @@ jobs:
       - name: Export web app
         run: npm run export:pages
         env:
-          EXPO_PUBLIC_API_URL: ${{ inputs.api_url || vars.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_API_URL: ${{ inputs.api_url || 'https://notify-warm-dining-fields.trycloudflare.com' }}
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

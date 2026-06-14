@@ -8,18 +8,20 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://tower-charging-subtle-likes.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://globe-header-entrance-friendly.trycloudflare.com"
       }
     },
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://tower-charging-subtle-likes.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://globe-header-entrance-friendly.trycloudflare.com"
       }
     },
     "production": {
       "autoIncrement": true,
-      "env": {}
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://globe-header-entrance-friendly.trycloudflare.com"
+      }
     }
   },
   "submit": {

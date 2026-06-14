@@ -4,6 +4,9 @@ const DEFAULT_API_URL = 'http://localhost:4300';
 const isProduction = process.env.NODE_ENV === 'production';
 const ANALYSIS_SESSION_STORAGE_KEY = 'skipcast.analysisSession';
 const ANALYSIS_SESSION_REFRESH_SKEW_MS = 30_000;
+const ANALYSIS_JOB_TIMEOUT_MS = 5 * 60_000;
+const ANALYSIS_JOB_MIN_POLL_MS = 1_000;
+const ANALYSIS_JOB_MAX_POLL_MS = 5_000;
 
 export const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || (isProduction ? '' : DEFAULT_API_URL);
 
@@ -43,6 +46,16 @@ type CachedAnalysisSession = {
   token: string;
   expiresAtMs: number;
 };
+
+type AnalysisJobResponse = {
+  episodeId: string;
+  jobId: string;
+  message: string;
+  pollAfterMs: number;
+  status: 'queued' | 'running';
+};
+
+type AnalysisResponse = AnalysisResult | AnalysisJobResponse;
 
 class ApiRequestError extends Error {
   readonly status: number;
@@ -167,7 +180,33 @@ function canFallbackWithoutAnalysisSession(error: unknown): boolean {
 }
 
 function shouldRefreshAnalysisSession(error: unknown): boolean {
-  return error instanceof ApiRequestError && error.status === 401;
+  return error instanceof ApiRequestError && (error.status === 401 || (error.status === 429 && /session quota/i.test(error.message)));
+}
+
+function isAnalysisResult(value: AnalysisResponse): value is AnalysisResult {
+  return Array.isArray((value as AnalysisResult).segments);
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function resolveAnalysisResponse(response: AnalysisResponse, startedAt = Date.now()): Promise<AnalysisResult> {
+  let nextResponse = response;
+
+  while (!isAnalysisResult(nextResponse)) {
+    if (Date.now() - startedAt > ANALYSIS_JOB_TIMEOUT_MS) {
+      throw new Error('Analysis is still running. Try again in a minute.');
+    }
+
+    const pollAfterMs = Math.min(ANALYSIS_JOB_MAX_POLL_MS, Math.max(ANALYSIS_JOB_MIN_POLL_MS, nextResponse.pollAfterMs || 2500));
+    await wait(pollAfterMs);
+    nextResponse = await requestJson<AnalysisResponse>(`/api/analyze/jobs/${encodeURIComponent(nextResponse.jobId)}`);
+  }
+
+  return nextResponse;
 }
 
 export function fetchPodcastFeed(feedUrl: string): Promise<PodcastFeed> {
@@ -226,7 +265,7 @@ export async function analyzeEpisode(episode: PodcastEpisode, knownDuration?: nu
     duration: knownDuration || episode.duration,
   });
 
-  const requestAnalysis = (session?: CachedAnalysisSession) => requestJson<AnalysisResult>('/api/analyze', {
+  const requestAnalysis = (session?: CachedAnalysisSession) => requestJson<AnalysisResponse>('/api/analyze', {
     method: 'POST',
     headers: session ? { 'x-skipcast-session': session.token } : undefined,
     body,
@@ -243,11 +282,11 @@ export async function analyzeEpisode(episode: PodcastEpisode, knownDuration?: nu
   }
 
   try {
-    return await requestAnalysis(session);
+    return await resolveAnalysisResponse(await requestAnalysis(session));
   } catch (error) {
     if (session && shouldRefreshAnalysisSession(error)) {
       clearCachedAnalysisSession();
-      return requestAnalysis(await getAnalysisSession(true));
+      return resolveAnalysisResponse(await requestAnalysis(await getAnalysisSession(true)));
     }
 
     throw error;

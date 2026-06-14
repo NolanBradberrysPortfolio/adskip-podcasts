@@ -804,6 +804,21 @@ export default function App() {
           </View>
 
           <View style={[styles.workspace, isWide && styles.workspaceWide]}>
+            {!isWide && selectedEpisode && (
+              <View testID="player-panel" style={styles.playerColumn}>
+                <PodcastPlayer
+                  episode={selectedEpisode}
+                  segments={selectedSegments}
+                  analyzing={analyzing}
+                  onAnalyze={runAnalysis}
+                  onUndoSkip={handleUndoSkip}
+                  canAnalyze={canAnalyze}
+                  analysisUnavailableLabel={analysisUnavailableLabel}
+                  analysisStatusLabel={analysisMessage}
+                />
+              </View>
+            )}
+
             <View style={[styles.panel, isWide && styles.libraryPanel]}>
               <View style={styles.panelHeader}>
                 <Text style={styles.panelTitle}>Library</Text>
@@ -844,21 +859,6 @@ export default function App() {
                 ))
               )}
             </View>
-
-            {!isWide && selectedEpisode && (
-              <View testID="player-panel" style={styles.playerColumn}>
-                <PodcastPlayer
-                  episode={selectedEpisode}
-                  segments={selectedSegments}
-                  analyzing={analyzing}
-                  onAnalyze={runAnalysis}
-                  onUndoSkip={handleUndoSkip}
-                  canAnalyze={canAnalyze}
-                  analysisUnavailableLabel={analysisUnavailableLabel}
-                  analysisStatusLabel={analysisMessage}
-                />
-              </View>
-            )}
 
             <View style={[styles.panel, isWide && styles.episodesPanel]}>
             <View style={styles.panelHeader}>

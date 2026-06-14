@@ -29,7 +29,7 @@ if (-not $env:OPENAI_API_KEY) {
     $env:LOCAL_WHISPER_MAX_AUDIO_MB = "20"
   }
   if (-not $env:LOCAL_WHISPER_MAX_SECONDS) {
-    $env:LOCAL_WHISPER_MAX_SECONDS = "90"
+    $env:LOCAL_WHISPER_MAX_SECONDS = "45"
   }
   if (-not $env:LOCAL_WHISPER_TIMEOUT_MS) {
     $env:LOCAL_WHISPER_TIMEOUT_MS = "180000"
@@ -112,7 +112,7 @@ for ($attempt = 0; $attempt -lt 45; $attempt += 1) {
   foreach ($candidateLog in @($tunnelLog, $tunnelErrorLog)) {
     if (Test-Path $candidateLog) {
       $log = Get-Content -LiteralPath $candidateLog -Raw -ErrorAction SilentlyContinue
-      if ($log -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
+      if ($log -match "https://[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)+\.trycloudflare\.com") {
         $apiUrl = $Matches[0]
         break
       }

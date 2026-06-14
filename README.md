@@ -58,11 +58,11 @@ GitHub Pages is static, so RSS and ad-scan features need the local API exposed t
 .\scripts\start-local-ai-backend.ps1
 ```
 
-If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and asks the signed-in Codex CLI to classify the timestamped transcript. The first local run downloads the Whisper model and local scans are CPU-heavy; the launcher keeps the no-key phone demo to a 90-second opening scan so the Cloudflare tunnel does not time out.
+If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and asks the signed-in Codex CLI to classify the timestamped transcript. The first local run downloads the Whisper model and local scans are CPU-heavy; the launcher keeps the no-key phone demo to a 45-second opening scan so the Cloudflare tunnel does not time out.
 
 The launcher starts the API with `ALLOW_UNAUTHENTICATED_ANALYZE=false` and `ANALYZE_PUBLIC_SESSIONS=true`. The Pages app asks the API for a short-lived analysis session before it calls `/api/analyze`, so the browser bundle does not contain a reusable analyze token.
 
-The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it limits analysis sessions, analysis requests, and concurrent scans to keep local usage bounded; stop it when you are done:
+The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it limits analysis sessions, analysis requests, queued analysis jobs, and concurrent scans to keep local usage bounded; stop it when you are done:
 
 ```powershell
 .\scripts\stop-local-ai-backend.ps1
@@ -76,7 +76,7 @@ To start the tunnel without redeploying Pages automatically:
 
 This tunnel setup is for testing. If the tunnel restarts, the backend URL changes and Pages must be redeployed.
 
-`eas.json` points native development and preview builds at the current temporary tunnel so test builds can use RSS/import features. Production native builds must set `EXPO_PUBLIC_API_URL` to a permanent HTTPS API before shipping a real iOS or Android release.
+`eas.json` points native development, preview, and production demo builds at the current temporary tunnel so test builds can use RSS/import features. Replace `EXPO_PUBLIC_API_URL` with a permanent HTTPS API before shipping a real iOS or Android release.
 
 ## AI Analysis
 
@@ -92,9 +92,11 @@ $env:LOCAL_WHISPER_MAX_SECONDS="1200"
 npm run server:start
 ```
 
-Local Whisper scans only the first `LOCAL_WHISPER_MAX_SECONDS` of an episode, defaults to the small `Xenova/whisper-tiny.en` model, and can use transcript cue rules for likely sponsor segments. It is useful for a private local demo, not a production-scale analyzer. Set `LOCAL_CODEX_AD_DETECTION=true` to ask the signed-in Codex CLI to classify transcript windows after local Whisper; the GitHub Pages quick-tunnel launcher enables this by default and caps the opening scan to 90 seconds.
+Local Whisper scans only the first `LOCAL_WHISPER_MAX_SECONDS` of an episode, defaults to the small `Xenova/whisper-tiny.en` model, and can use transcript cue rules for likely sponsor segments. It is useful for a private local demo, not a production-scale analyzer. Set `LOCAL_CODEX_AD_DETECTION=true` to ask the signed-in Codex CLI to classify transcript windows after local Whisper; the GitHub Pages quick-tunnel launcher enables this by default and caps the opening scan to 45 seconds.
 
 If no analysis engine is enabled or the episode audio is too large, the API returns `unavailable` with no skip segments. The app does not auto-skip fake timestamps.
+
+Long analysis requests return a queued job quickly and the app polls `/api/analyze/jobs/:jobId` until timestamps are ready. The local queue is in memory, so restarting the API clears pending analysis jobs.
 
 Use an OpenAI Platform API key on the private API server:
 
@@ -115,6 +117,6 @@ The app stores timestamp metadata and seeks over ranges during foreground playba
 
 Production builds should set `EXPO_PUBLIC_API_URL` to a deployed HTTPS API. The default `localhost` URL is for local web development only.
 
-For a deployed API, set `CORS_ORIGINS` to the exact app origins allowed to call the server and tune `RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_SESSION_MAX_REQUESTS`, `ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_MAX_CONCURRENT`, `MAX_EPISODES_PER_FEED`, `OPML_MAX_CHARS`, `OPML_MAX_NODES`, `OPML_MAX_DEPTH`, and `OPML_VALIDATE_CONCURRENCY` for your hosting/cost limits. In `NODE_ENV=production`, or whenever `OPENAI_API_KEY` is enabled without `ALLOW_ANY_CORS_ORIGIN=true`, the API refuses to start if `CORS_ORIGINS` is empty.
+For a deployed API, set `CORS_ORIGINS` to the exact app origins allowed to call the server and tune `RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_SESSION_MAX_REQUESTS`, `ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_MAX_CONCURRENT`, `ANALYZE_MAX_JOBS`, `ANALYZE_JOB_TTL_MINUTES`, `MAX_EPISODES_PER_FEED`, `OPML_MAX_CHARS`, `OPML_MAX_NODES`, `OPML_MAX_DEPTH`, and `OPML_VALIDATE_CONCURRENCY` for your hosting/cost limits. In `NODE_ENV=production`, or whenever `OPENAI_API_KEY` is enabled without `ALLOW_ANY_CORS_ORIGIN=true`, the API refuses to start if `CORS_ORIGINS` is empty.
 
 The session system is a demo/public-beta guardrail, not full account security. A public release still needs real user auth, per-user quotas, billing controls, durable hosting, and abuse monitoring around `/api/analyze`.

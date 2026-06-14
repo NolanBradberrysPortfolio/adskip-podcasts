@@ -46,6 +46,8 @@ const ANALYZE_SESSION_TTL_MS = readPositiveInteger('ANALYZE_SESSION_TTL_MINUTES'
 const ANALYZE_SESSION_MAX_REQUESTS = readPositiveInteger('ANALYZE_SESSION_MAX_REQUESTS', 3);
 const ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS = readPositiveInteger('ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS', 60 * 60_000);
 const ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS = readPositiveInteger('ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS', 12);
+const ANALYZE_JOB_TTL_MS = readPositiveInteger('ANALYZE_JOB_TTL_MINUTES', 30) * 60_000;
+const ANALYZE_MAX_JOBS = readPositiveInteger('ANALYZE_MAX_JOBS', 20);
 const ALLOW_ANY_CORS_ORIGIN = process.env.ALLOW_ANY_CORS_ORIGIN === 'true';
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
 const OPENAI_AD_DETECTION_MODEL = process.env.OPENAI_AD_DETECTION_MODEL || 'gpt-4o-mini';
@@ -266,6 +268,16 @@ type AnalyzeSession = {
   uses: number;
 };
 
+type AnalyzeJob = {
+  id: string;
+  episodeId: string;
+  expiresAt: number;
+  episode: z.infer<typeof analyzeSchema>;
+  message: string;
+  result?: AnalysisResult;
+  status: 'queued' | 'running' | 'complete';
+};
+
 type ItunesSearchResult = {
   collectionName?: string;
   artistName?: string;
@@ -284,6 +296,8 @@ const podcastSearchCache = new Map<string, { expiresAt: number; result?: ItunesS
 const spotifyMatchRateBuckets = new Map<string, RateBucket>();
 const analyzeSessions = new Map<string, AnalyzeSession>();
 const analyzeSessionRateBuckets = new Map<string, RateBucket>();
+const analyzeJobs = new Map<string, AnalyzeJob>();
+const pendingAnalyzeJobIds: string[] = [];
 let nextSpotifyMatchRateLimitPruneAt = Date.now() + SPOTIFY_MATCH_RATE_LIMIT_WINDOW_MS;
 let nextAnalyzeSessionRateLimitPruneAt = Date.now() + ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS;
 
@@ -320,6 +334,10 @@ app.get('/api/health', (_request, response) => {
       enabled: HAS_ANALYSIS_ENGINE && ANALYZE_PUBLIC_SESSIONS,
       maxRequests: ANALYZE_SESSION_MAX_REQUESTS,
       ttlMinutes: Math.round(ANALYZE_SESSION_TTL_MS / 60_000),
+    },
+    analysisJobs: {
+      ttlMinutes: Math.round(ANALYZE_JOB_TTL_MS / 60_000),
+      maxJobs: ANALYZE_MAX_JOBS,
     },
   });
 });
@@ -517,17 +535,31 @@ app.post('/api/analyze/session', (_request, response) => {
   });
 });
 
+app.get('/api/analyze/jobs/:jobId', (request, response) => {
+  pruneAnalyzeJobs();
+  const job = analyzeJobs.get(String(request.params.jobId || ''));
+
+  if (!job) {
+    response.status(404).json({ error: 'Analysis job not found' });
+    return;
+  }
+
+  if (job.result) {
+    response.json(job.result);
+    return;
+  }
+
+  response.status(202).json(serializeAnalyzeJob(job));
+});
+
 app.post('/api/analyze', async (request, response) => {
   const hasPrivateAnalyzeToken = Boolean(ANALYZE_API_TOKEN && request.header('x-skipcast-token') === ANALYZE_API_TOKEN);
+  const requiresAnalyzeSession = HAS_ANALYSIS_ENGINE && !hasPrivateAnalyzeToken && !ALLOW_UNAUTHENTICATED_ANALYZE;
 
   const parsed = analyzeSchema.safeParse(request.body);
 
   if (!parsed.success) {
     response.status(400).json({ error: 'Invalid analysis payload' });
-    return;
-  }
-
-  if (HAS_ANALYSIS_ENGINE && !hasPrivateAnalyzeToken && !ALLOW_UNAUTHENTICATED_ANALYZE && !takeAnalyzeSession(request, response)) {
     return;
   }
 
@@ -539,12 +571,19 @@ app.post('/api/analyze', async (request, response) => {
       return;
     }
 
-    if (activeAnalyses >= ANALYZE_MAX_CONCURRENT) {
-      response.status(429).json({ error: 'Too many analyses in progress' });
+    pruneAnalyzeJobs();
+    if (analyzeJobs.size >= ANALYZE_MAX_JOBS) {
+      response.status(429).json({ error: 'Too many analysis jobs in progress' });
       return;
     }
 
-    activeAnalyses += 1;
+    if (requiresAnalyzeSession && !takeAnalyzeSession(request, response)) {
+      return;
+    }
+
+    const job = enqueueAnalyzeJob(episode);
+    response.status(202).json(serializeAnalyzeJob(job));
+    return;
   }
 
   try {
@@ -553,10 +592,6 @@ app.post('/api/analyze', async (request, response) => {
   } catch (error) {
     const result = unavailableAnalysis(episode, error instanceof Error ? error.message : 'Analysis failed');
     response.status(502).json(result);
-  } finally {
-    if (takesAnalysisBudget) {
-      activeAnalyses = Math.max(0, activeAnalyses - 1);
-    }
   }
 });
 
@@ -691,6 +726,68 @@ function takeAnalyzeSession(request: express.Request, response: express.Response
   return true;
 }
 
+function enqueueAnalyzeJob(episode: z.infer<typeof analyzeSchema>): AnalyzeJob {
+  const job: AnalyzeJob = {
+    id: base64Url(randomBytes(18)),
+    episodeId: episode.episodeId,
+    episode,
+    expiresAt: Date.now() + ANALYZE_JOB_TTL_MS,
+    message: 'Analysis queued',
+    status: 'queued',
+  };
+
+  analyzeJobs.set(job.id, job);
+  pendingAnalyzeJobIds.push(job.id);
+  setImmediate(runQueuedAnalyzeJobs);
+  return job;
+}
+
+function runQueuedAnalyzeJobs(): void {
+  while (activeAnalyses < ANALYZE_MAX_CONCURRENT && pendingAnalyzeJobIds.length > 0) {
+    const jobId = pendingAnalyzeJobIds.shift();
+    if (!jobId) {
+      return;
+    }
+
+    const job = analyzeJobs.get(jobId);
+    if (!job || job.status !== 'queued' || job.expiresAt <= Date.now()) {
+      if (job) {
+        analyzeJobs.delete(job.id);
+      }
+      continue;
+    }
+
+    activeAnalyses += 1;
+    job.status = 'running';
+    job.message = 'Analyzing episode';
+
+    void completeAnalyzeJob(job);
+  }
+}
+
+async function completeAnalyzeJob(job: AnalyzeJob): Promise<void> {
+  try {
+    job.result = await analyzePodcastEpisode(job.episode);
+  } catch (error) {
+    job.result = unavailableAnalysis(job.episode, error instanceof Error ? error.message : 'Analysis failed');
+  } finally {
+    job.status = 'complete';
+    job.message = job.result?.message || 'Analysis complete';
+    activeAnalyses = Math.max(0, activeAnalyses - 1);
+    runQueuedAnalyzeJobs();
+  }
+}
+
+function serializeAnalyzeJob(job: AnalyzeJob): { episodeId: string; jobId: string; message: string; pollAfterMs: number; status: 'queued' | 'running' } {
+  return {
+    episodeId: job.episodeId,
+    jobId: job.id,
+    message: job.message,
+    pollAfterMs: 2500,
+    status: job.status === 'complete' ? 'running' : job.status,
+  };
+}
+
 function takeSpotifyMatchRateLimit(request: express.Request, response: express.Response): boolean {
   const now = Date.now();
   if (now >= nextSpotifyMatchRateLimitPruneAt) {
@@ -714,6 +811,20 @@ function pruneAnalyzeSessions(now = Date.now()): void {
   for (const [tokenHash, session] of analyzeSessions.entries()) {
     if (session.expiresAt <= now) {
       analyzeSessions.delete(tokenHash);
+    }
+  }
+}
+
+function pruneAnalyzeJobs(now = Date.now()): void {
+  for (const [jobId, job] of analyzeJobs.entries()) {
+    if (job.expiresAt <= now) {
+      analyzeJobs.delete(jobId);
+    }
+  }
+
+  for (let index = pendingAnalyzeJobIds.length - 1; index >= 0; index -= 1) {
+    if (!analyzeJobs.has(pendingAnalyzeJobIds[index])) {
+      pendingAnalyzeJobIds.splice(index, 1);
     }
   }
 }

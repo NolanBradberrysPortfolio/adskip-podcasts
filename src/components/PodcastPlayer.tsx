@@ -8,7 +8,7 @@ import {
   type ChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { ActivityIndicator, AppState, Image, Platform, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Platform, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { Pause, Play, RotateCcw, ScanLine, SkipForward } from 'lucide-react-native';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
@@ -75,7 +75,6 @@ export function PodcastPlayer({
 }: Props) {
   const [autoSkip, setAutoSkip] = useState(true);
   const [rate, setRate] = useState(1);
-  const [isForeground, setIsForeground] = useState(AppState.currentState === 'active');
   const [timelineFocused, setTimelineFocused] = useState(false);
   const lastSkipped = useRef<AdSegment | null>(null);
   const skippedIds = useRef(new Set<string>());
@@ -109,14 +108,6 @@ export function PodcastPlayer({
   }, []);
 
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', (state) => {
-      setIsForeground(state === 'active');
-    });
-
-    return () => subscription.remove();
-  }, []);
-
-  useEffect(() => {
     skippedIds.current = new Set();
     lastSkipped.current = null;
   }, [episode?.id]);
@@ -126,7 +117,7 @@ export function PodcastPlayer({
   }, [player, rate]);
 
   useEffect(() => {
-    if (!effectiveAutoSkip || !isForeground || !episode || !status.playing) {
+    if (!effectiveAutoSkip || !episode || !status.playing) {
       return;
     }
 
@@ -146,7 +137,7 @@ export function PodcastPlayer({
     skippedIds.current.add(segment.id);
     lastSkipped.current = segment;
     player.seekTo(segment.end + 0.2).catch(() => undefined);
-  }, [effectiveAutoSkip, episode, isForeground, player, segments, status.currentTime, status.playing]);
+  }, [effectiveAutoSkip, episode, player, segments, status.currentTime, status.playing]);
 
   const duration = status.duration || episode?.duration || 0;
   const progress = duration ? clamp(status.currentTime / duration, 0, 1) : 0;

@@ -694,6 +694,7 @@ export default function App() {
         scrollRef.current?.scrollTo({ y: 0, animated: true });
       };
 
+      scrollToPlayer();
       setTimeout(scrollToPlayer, 80);
       setTimeout(scrollToPlayer, 220);
     }

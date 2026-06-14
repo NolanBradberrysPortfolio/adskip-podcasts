@@ -1884,7 +1884,7 @@ function scorePodcastMatch(show: SpotifyImportShow, result: ItunesSearchResult):
   let score = 0;
 
   if (showTitle && resultTitle) {
-    if (showTitle === resultTitle) {
+    if (isExactOrPublisherSuffixedTitle(showTitle, resultTitle, showPublisher)) {
       score += 0.9;
     } else if (showTitle.includes(resultTitle) || resultTitle.includes(showTitle)) {
       score += 0.42;
@@ -1914,7 +1914,20 @@ function scorePodcastMatch(show: SpotifyImportShow, result: ItunesSearchResult):
 function isExactPodcastTitleMatch(show: SpotifyImportShow, result: ItunesSearchResult): boolean {
   const showTitle = normalizeMatchText(show.title);
   const resultTitle = normalizeMatchText(result.collectionName);
-  return Boolean(showTitle && resultTitle && showTitle === resultTitle);
+  const showPublisher = normalizeMatchText(show.publisher);
+  return Boolean(showTitle && resultTitle && isExactOrPublisherSuffixedTitle(showTitle, resultTitle, showPublisher));
+}
+
+function isExactOrPublisherSuffixedTitle(showTitle: string, resultTitle: string, showPublisher: string): boolean {
+  if (showTitle === resultTitle) {
+    return true;
+  }
+
+  if (!showPublisher) {
+    return false;
+  }
+
+  return resultTitle === `${showTitle} from ${showPublisher}` || resultTitle === `${showTitle} by ${showPublisher}`;
 }
 
 function normalizeMatchText(value?: string): string {

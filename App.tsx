@@ -251,6 +251,7 @@ export default function App() {
   const [loadingFeed, setLoadingFeed] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [message, setMessage] = useState('Ready');
+  const [analysisMessage, setAnalysisMessage] = useState('');
   const [opmlModalOpen, setOpmlModalOpen] = useState(false);
   const [importInitialMode, setImportInitialMode] = useState<ImportMode>('apple');
   const [spotifyResultToken, setSpotifyResultToken] = useState<string>();
@@ -519,12 +520,13 @@ export default function App() {
           onProgress?.({ completed, total: uniqueUrls.length });
         }
       });
-      const importedFeeds = outcomes
+      const importedFeedCandidates = outcomes
         .filter((outcome): outcome is { status: 'fulfilled'; feed: PodcastFeed } => outcome.status === 'fulfilled')
         .map((outcome) => outcome.feed);
+      const importedFeeds = [...new Map(importedFeedCandidates.map((feed) => [feed.feedUrl, feed])).values()];
       const importedUrls = new Set(importedFeeds.map((feed) => feed.feedUrl));
-      const failed = uniqueUrls.length - importedFeeds.length;
-      const skipped = urls.length - uniqueUrls.length;
+      const failed = uniqueUrls.length - importedFeedCandidates.length;
+      const skipped = urls.length - uniqueUrls.length + (importedFeedCandidates.length - importedFeeds.length);
       const summary = {
         imported: importedFeeds.length,
         failed,
@@ -628,12 +630,16 @@ export default function App() {
     }
 
     if (apiStatus === 'api-offline' || apiStatus === 'checking') {
-      setMessage(apiStatus === 'checking' ? 'API health check is still running' : 'Analysis unavailable: API offline');
+      const nextMessage = apiStatus === 'checking' ? 'API health check is still running' : 'Analysis unavailable: API offline';
+      setMessage(nextMessage);
+      setAnalysisMessage(nextMessage);
       return;
     }
 
     if (!canAnalyze) {
-      setMessage('Analysis unavailable: API has no OpenAI key');
+      const nextMessage = 'Analysis unavailable: AI scanner is offline';
+      setMessage(nextMessage);
+      setAnalysisMessage(nextMessage);
       return;
     }
 
@@ -652,6 +658,7 @@ export default function App() {
 
     setAnalyzing(true);
     setMessage('Analyzing episode');
+    setAnalysisMessage('Analyzing episode');
 
     try {
       const result = await analyzeEpisode(selectedEpisode);
@@ -660,8 +667,11 @@ export default function App() {
         [selectedEpisode.id]: result.segments,
       });
       setMessage(result.message);
+      setAnalysisMessage(result.message);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Analysis failed');
+      const nextMessage = error instanceof Error ? error.message : 'Analysis failed';
+      setMessage(nextMessage);
+      setAnalysisMessage(nextMessage);
     } finally {
       setAnalyzing(false);
     }
@@ -679,6 +689,7 @@ export default function App() {
 
   const selectEpisode = (episode: PodcastEpisode) => {
     setSelectedEpisodeId(episode.id);
+    setAnalysisMessage('');
 
     if (!isWide) {
       const scrollToPlayer = () => {
@@ -844,6 +855,7 @@ export default function App() {
                   onUndoSkip={handleUndoSkip}
                   canAnalyze={canAnalyze}
                   analysisUnavailableLabel={analysisUnavailableLabel}
+                  analysisStatusLabel={analysisMessage}
                 />
               </View>
             )}
@@ -993,6 +1005,7 @@ export default function App() {
                   onUndoSkip={handleUndoSkip}
                   canAnalyze={canAnalyze}
                   analysisUnavailableLabel={analysisUnavailableLabel}
+                  analysisStatusLabel={analysisMessage}
                 />
               </View>
             )}

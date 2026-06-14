@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
-const pageUrl = `https://nolanbradberrysportfolio.github.io/adskip-podcasts/?phoneSmoke=${Date.now()}`;
+const pageBaseUrl = process.env.SKIPCAST_TEST_URL || 'https://nolanbradberrysportfolio.github.io/adskip-podcasts/';
+const pageUrl = `${pageBaseUrl}?phoneSmoke=${Date.now()}`;
 const feedUrl = 'https://feeds.npr.org/510318/podcast.xml';
 
 test.use({
@@ -23,9 +24,11 @@ test('GitHub Pages phone web flow can add RSS and reach the player', async ({ pa
 
   await page.getByRole('button', { name: /no skip segments/i }).first().click();
   await expect(page.getByRole('button', { name: 'Play' })).toBeVisible();
+  await page.getByRole('button', { name: 'Play' }).click();
+  await expect(page.getByRole('dialog', { name: 'Analyze Episode' })).toHaveCount(0);
 
   const metrics = await page.evaluate(() => {
-    const playButton = document.querySelector('[aria-label="Play"]')?.getBoundingClientRect();
+    const playButton = document.querySelector('[aria-label="Pause"], [aria-label="Play"]')?.getBoundingClientRect();
     return {
       horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
       playTop: playButton?.top ?? null,

@@ -22,6 +22,7 @@ import { z } from 'zod';
 import type { AdSegment, AnalysisResult, ImportFeedCandidate, PodcastEpisode, PodcastFeed, SegmentCategory, SpotifyImportShow } from '../src/types';
 
 const PORT = readPositiveInteger('PORT', 4300);
+const HOST = process.env.HOST || '127.0.0.1';
 const MAX_AUDIO_BYTES = readPositiveInteger('MAX_TRANSCRIPTION_AUDIO_MB', 24) * 1024 * 1024;
 const MAX_FEED_BYTES = readPositiveInteger('MAX_FEED_XML_MB', 3) * 1024 * 1024;
 const MAX_EPISODES_PER_FEED = readPositiveInteger('MAX_EPISODES_PER_FEED', 150);
@@ -201,6 +202,7 @@ type AiAdCandidate = z.infer<typeof aiAdCandidateSchema>;
 
 type SafeHttpResponse = {
   body: IncomingMessage;
+  finalUrl: string;
   headers: IncomingHttpHeaders;
   statusCode: number;
 };
@@ -276,6 +278,14 @@ const app = express();
 app.use(applyCors);
 app.use(rateLimit);
 app.use(express.json({ limit: '2mb' }));
+app.use((error: unknown, _request: express.Request, response: express.Response, next: express.NextFunction) => {
+  if (error instanceof SyntaxError) {
+    response.status(400).json({ error: 'Invalid JSON payload' });
+    return;
+  }
+
+  next(error);
+});
 
 app.get('/api/health', (_request, response) => {
   response.json({
@@ -306,9 +316,10 @@ app.get('/api/feed', async (request, response) => {
 
   try {
     const finalFeedUrl = await validatePublicHttpUrl(feedUrl);
-    const xml = await safeFetchText(finalFeedUrl, MAX_FEED_BYTES);
+    const responseBody = await safeFetchTextWithFinalUrl(finalFeedUrl, MAX_FEED_BYTES);
+    const xml = responseBody.text;
     const parsed = await feedParser.parseString(xml);
-    response.json(await normalizeFeed(finalFeedUrl, parsed));
+    response.json(await normalizeFeed(responseBody.finalUrl, parsed));
   } catch (error) {
     response.status(400).json({ error: error instanceof Error ? error.message : 'Feed could not be parsed' });
   }
@@ -505,8 +516,18 @@ app.post('/api/analyze', async (request, response) => {
   }
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`SkipCast API listening on http://localhost:${PORT}`);
+app.use((error: unknown, _request: express.Request, response: express.Response, next: express.NextFunction) => {
+  console.warn('Unhandled API error', error);
+  if (response.headersSent) {
+    next(error);
+    return;
+  }
+
+  response.status(500).json({ error: 'Unexpected server error' });
+});
+
+const server = app.listen(PORT, HOST, () => {
+  console.log(`SkipCast API listening on http://${HOST}:${PORT}`);
 });
 
 function readPositiveInteger(name: string, fallback: number): number {
@@ -653,7 +674,7 @@ function pruneRateBuckets(buckets: Map<string, RateBucket>, now: number): void {
   }
 }
 
-async function safeFetchText(inputUrl: string, byteLimit: number): Promise<string> {
+async function safeFetchTextWithFinalUrl(inputUrl: string, byteLimit: number): Promise<{ text: string; finalUrl: string }> {
   const response = await fetchWithSafeRedirects(inputUrl, 'application/rss+xml, application/xml, text/xml, */*');
 
   if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -675,7 +696,14 @@ async function safeFetchText(inputUrl: string, byteLimit: number): Promise<strin
     chunks.push(buffer);
   }
 
-  return Buffer.concat(chunks).toString('utf8');
+  return {
+    text: Buffer.concat(chunks).toString('utf8'),
+    finalUrl: response.finalUrl,
+  };
+}
+
+async function safeFetchText(inputUrl: string, byteLimit: number): Promise<string> {
+  return (await safeFetchTextWithFinalUrl(inputUrl, byteLimit)).text;
 }
 
 async function safeFetchToFile(inputUrl: string, targetPath: string, byteLimit: number): Promise<void> {
@@ -737,7 +765,10 @@ async function fetchWithSafeRedirects(inputUrl: string, accept: string, extraHea
     const response = await safeRequestOnce(currentUrl, accept, extraHeaders);
 
     if (![301, 302, 303, 307, 308].includes(response.statusCode)) {
-      return response;
+      return {
+        ...response,
+        finalUrl: currentUrl,
+      };
     }
 
     response.body.resume();
@@ -792,6 +823,7 @@ async function safeRequestOnce(inputUrl: string, accept: string, extraHeaders?: 
     const request = client.request(requestOptions, (response) => {
       resolve({
         body: response,
+        finalUrl: inputUrl,
         headers: response.headers,
         statusCode: response.statusCode || 0,
       });
@@ -825,6 +857,7 @@ async function validatePublicHttpUrl(inputUrl: string): Promise<string> {
   }
 
   await assertPublicHostname(url.hostname);
+  url.hash = '';
   return url.toString();
 }
 
@@ -1758,16 +1791,19 @@ async function matchShowsToFeedCandidates(shows: SpotifyImportShow[]): Promise<I
       };
     }
 
+    const exactTitleMatch = isExactPodcastTitleMatch(show, result);
+    const autoMatched = exactTitleMatch && confidence >= 0.76;
+
     return {
       id: stableId(`spotify:${show.title}:${safeFeedUrl}`),
       source: 'spotify',
-      status: confidence >= 0.76 ? 'matched' : 'needs_review',
+      status: autoMatched ? 'matched' : 'needs_review',
       title: result.collectionName || show.title,
       publisher: result.artistName || show.publisher,
       feedUrl: safeFeedUrl,
       artworkUrl: result.artworkUrl100 || show.imageUrl,
       confidence,
-      reason: confidence >= 0.76 ? 'Strong title and publisher match' : 'Review this public RSS match before importing',
+      reason: autoMatched ? 'Exact title and strong publisher match' : 'Review this public RSS match before importing',
       externalUrl: result.collectionViewUrl || show.spotifyUrl,
     };
   });
@@ -1849,9 +1885,9 @@ function scorePodcastMatch(show: SpotifyImportShow, result: ItunesSearchResult):
 
   if (showTitle && resultTitle) {
     if (showTitle === resultTitle) {
-      score += 0.72;
+      score += 0.9;
     } else if (showTitle.includes(resultTitle) || resultTitle.includes(showTitle)) {
-      score += 0.58;
+      score += 0.42;
     } else {
       const overlap = tokenOverlap(showTitle, resultTitle);
       score += Math.min(0.48, overlap * 0.6);
@@ -1873,6 +1909,12 @@ function scorePodcastMatch(show: SpotifyImportShow, result: ItunesSearchResult):
   }
 
   return Math.max(0, Math.min(1, Number(score.toFixed(2))));
+}
+
+function isExactPodcastTitleMatch(show: SpotifyImportShow, result: ItunesSearchResult): boolean {
+  const showTitle = normalizeMatchText(show.title);
+  const resultTitle = normalizeMatchText(result.collectionName);
+  return Boolean(showTitle && resultTitle && showTitle === resultTitle);
 }
 
 function normalizeMatchText(value?: string): string {

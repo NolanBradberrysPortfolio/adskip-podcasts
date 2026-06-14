@@ -10,10 +10,11 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $runDir = Join-Path $root ".skipcast-local"
 $serverLog = Join-Path $runDir "server.log"
 $tunnelLog = Join-Path $runDir "cloudflared.log"
+$serverScript = Join-Path $runDir "server-start.ps1"
 $origin = "https://nolanbradberrysportfolio.github.io"
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-Remove-Item -LiteralPath $serverLog, $tunnelLog -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $serverLog, $tunnelLog, $serverScript -Force -ErrorAction SilentlyContinue
 
 if (-not $env:OPENAI_API_KEY) {
   Write-Host "OPENAI_API_KEY is not set. Starting local Whisper transcription instead."
@@ -28,6 +29,12 @@ if (-not $env:OPENAI_API_KEY) {
   }
   if (-not $env:LOCAL_WHISPER_MAX_SECONDS) {
     $env:LOCAL_WHISPER_MAX_SECONDS = "180"
+  }
+  if ($env:SKIPCAST_DISABLE_CODEX_AD_DETECTION -ne "true") {
+    $env:LOCAL_CODEX_AD_DETECTION = "true"
+  }
+  if (-not $env:CODEX_AD_DETECTION_TIMEOUT_MS) {
+    $env:CODEX_AD_DETECTION_TIMEOUT_MS = "45000"
   }
 }
 
@@ -68,11 +75,26 @@ if (-not $env:ANALYZE_MAX_CONCURRENT) {
 
 $serverCommand = @"
 Set-Location '$root'
+`$env:PORT = '$($env:PORT)'
+`$env:CORS_ORIGINS = '$($env:CORS_ORIGINS)'
+`$env:ANALYZE_API_TOKEN = '$($env:ANALYZE_API_TOKEN)'
+`$env:ALLOW_UNAUTHENTICATED_ANALYZE = '$($env:ALLOW_UNAUTHENTICATED_ANALYZE)'
+`$env:OPENAI_TRANSCRIBE_MODEL = '$($env:OPENAI_TRANSCRIBE_MODEL)'
+`$env:OPENAI_AD_DETECTION_MODEL = '$($env:OPENAI_AD_DETECTION_MODEL)'
+`$env:LOCAL_WHISPER_TRANSCRIBE = '$($env:LOCAL_WHISPER_TRANSCRIBE)'
+`$env:LOCAL_WHISPER_MODEL = '$($env:LOCAL_WHISPER_MODEL)'
+`$env:LOCAL_WHISPER_MAX_AUDIO_MB = '$($env:LOCAL_WHISPER_MAX_AUDIO_MB)'
+`$env:LOCAL_WHISPER_MAX_SECONDS = '$($env:LOCAL_WHISPER_MAX_SECONDS)'
+`$env:LOCAL_CODEX_AD_DETECTION = '$($env:LOCAL_CODEX_AD_DETECTION)'
+`$env:CODEX_AD_DETECTION_TIMEOUT_MS = '$($env:CODEX_AD_DETECTION_TIMEOUT_MS)'
+`$env:ANALYZE_RATE_LIMIT_MAX_REQUESTS = '$($env:ANALYZE_RATE_LIMIT_MAX_REQUESTS)'
+`$env:ANALYZE_MAX_CONCURRENT = '$($env:ANALYZE_MAX_CONCURRENT)'
 npm run server:start *> '$serverLog'
 "@
 
+$serverCommand | Set-Content -LiteralPath $serverScript
 Write-Host "Starting SkipCast API on http://localhost:$Port ..."
-$serverProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $serverCommand) -WindowStyle Hidden -PassThru
+$serverProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& '$serverScript'") -WindowStyle Hidden -PassThru
 
 Write-Host "Starting Cloudflare tunnel ..."
 $tunnelArgs = "/c ""`"$cloudflared`" tunnel --url http://localhost:$Port --no-autoupdate 1> `"$tunnelLog`" 2>&1"""
@@ -106,14 +128,22 @@ Write-Host "Tunnel URL: $apiUrl"
   startedAt = (Get-Date).ToString("o")
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir "processes.json")
 
+$healthy = $false
 for ($attempt = 0; $attempt -lt 15; $attempt += 1) {
   try {
     $health = Invoke-RestMethod -Uri "$apiUrl/api/health" -TimeoutSec 15
     Write-Host "Health: ok=$($health.ok) openai=$($health.openai) localWhisper=$($health.localWhisper) adModel=$($health.adDetectionModel)"
+    $healthy = $true
     break
   } catch {
     Start-Sleep -Seconds 2
   }
+}
+
+if (-not $healthy) {
+  Write-Host "Server log: $serverLog"
+  Write-Host "Tunnel log: $tunnelLog"
+  throw "SkipCast API did not become healthy."
 }
 
 if ($NoDeploy) {

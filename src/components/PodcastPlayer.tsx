@@ -24,6 +24,7 @@ type Props = {
   onUndoSkip: () => void;
   canAnalyze?: boolean;
   analysisUnavailableLabel?: string;
+  analysisStatusLabel?: string;
 };
 
 const speedOptions = [1, 1.25, 1.5, 2];
@@ -70,6 +71,7 @@ export function PodcastPlayer({
   onUndoSkip,
   canAnalyze = true,
   analysisUnavailableLabel = 'AI offline',
+  analysisStatusLabel,
 }: Props) {
   const [autoSkip, setAutoSkip] = useState(true);
   const [rate, setRate] = useState(1);
@@ -201,9 +203,6 @@ export function PodcastPlayer({
       artist: episode.podcastTitle,
       artworkUrl: episode.artworkUrl,
     });
-    if (canAnalyze && !hasSkipSegments && !analyzing) {
-      await onAnalyze();
-    }
     player.play();
   };
 
@@ -322,41 +321,49 @@ export function PodcastPlayer({
       </View>
 
       {showSkipTools ? (
-        <View style={styles.playerTools}>
-          <Pressable
-            {...switchWebProps(effectiveAutoSkip, !hasSkipSegments, toggleAutoSkip)}
-            accessibilityRole="switch"
-            accessibilityLabel="Auto-skip"
-            accessibilityState={{ checked: effectiveAutoSkip, disabled: !hasSkipSegments }}
-            disabled={!hasSkipSegments}
-            onPress={toggleAutoSkip}
-            style={[styles.switchRow, !hasSkipSegments && styles.switchRowDisabled]}
-          >
-            <Text style={[styles.toolLabel, !hasSkipSegments && styles.toolLabelDisabled]}>Auto-skip</Text>
-            {Platform.OS === 'web' ? (
-              <View style={[styles.switchTrack, effectiveAutoSkip && styles.switchTrackOn]}>
-                <View style={[styles.switchThumb, effectiveAutoSkip && styles.switchThumbOn]} />
-              </View>
-            ) : (
-              <View pointerEvents="none" importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
-                <Switch
-                  value={effectiveAutoSkip}
-                  onValueChange={setAutoSkip}
-                  disabled={!hasSkipSegments}
-                  trackColor={{ false: '#D1D5DB', true: '#9BD7CA' }}
-                  thumbColor={effectiveAutoSkip ? '#122620' : '#F8FAF7'}
-                />
-              </View>
-            )}
-          </Pressable>
-          <IconButton
-            icon={ScanLine}
-            label={analyzing ? 'Analyzing' : canAnalyze ? 'Analyze' : analysisUnavailableLabel}
-            onPress={onAnalyze}
-            disabled={analyzing || !canAnalyze}
-          />
-          <IconButton icon={RotateCcw} label="Undo skip" onPress={undoSkip} disabled={!lastSkipped.current} variant="ghost" />
-        </View>
+        <>
+          <View style={styles.playerTools}>
+            <Pressable
+              {...switchWebProps(effectiveAutoSkip, !hasSkipSegments, toggleAutoSkip)}
+              accessibilityRole="switch"
+              accessibilityLabel="Auto-skip"
+              accessibilityState={{ checked: effectiveAutoSkip, disabled: !hasSkipSegments }}
+              disabled={!hasSkipSegments}
+              onPress={toggleAutoSkip}
+              style={[styles.switchRow, !hasSkipSegments && styles.switchRowDisabled]}
+            >
+              <Text style={[styles.toolLabel, !hasSkipSegments && styles.toolLabelDisabled]}>Auto-skip</Text>
+              {Platform.OS === 'web' ? (
+                <View style={[styles.switchTrack, effectiveAutoSkip && styles.switchTrackOn]}>
+                  <View style={[styles.switchThumb, effectiveAutoSkip && styles.switchThumbOn]} />
+                </View>
+              ) : (
+                <View pointerEvents="none" importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
+                  <Switch
+                    value={effectiveAutoSkip}
+                    onValueChange={setAutoSkip}
+                    disabled={!hasSkipSegments}
+                    trackColor={{ false: '#D1D5DB', true: '#9BD7CA' }}
+                    thumbColor={effectiveAutoSkip ? '#122620' : '#F8FAF7'}
+                  />
+                </View>
+              )}
+            </Pressable>
+            <IconButton
+              icon={ScanLine}
+              label={analyzing ? 'Analyzing' : canAnalyze ? 'Analyze' : analysisUnavailableLabel}
+              onPress={onAnalyze}
+              disabled={analyzing || !canAnalyze}
+            />
+            <IconButton icon={RotateCcw} label="Undo skip" onPress={undoSkip} disabled={!lastSkipped.current} variant="ghost" />
+          </View>
+          {analysisStatusLabel ? (
+            <View style={styles.analysisStatus}>
+              <ScanLine size={17} color="#0F766E" />
+              <Text accessibilityLiveRegion="polite" style={styles.analysisStatusText}>{analysisStatusLabel}</Text>
+            </View>
+          ) : null}
+        </>
       ) : (
         <View style={styles.analysisNotice}>
           <ScanLine size={17} color="#5F6B63" />
@@ -562,6 +569,24 @@ const styles = StyleSheet.create({
   analysisNoticeText: {
     color: '#5F6B63',
     fontWeight: '800',
+  },
+  analysisStatus: {
+    minHeight: 40,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#ECFDF5',
+  },
+  analysisStatusText: {
+    flex: 1,
+    minWidth: 0,
+    color: '#122620',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 16,
   },
   switchRow: {
     minHeight: 44,

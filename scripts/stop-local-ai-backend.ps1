@@ -23,5 +23,23 @@ foreach ($id in @($processes.serverProcessId, $processes.tunnelProcessId)) {
   }
 }
 
+$port = $processes.port
+if ($port) {
+  $listeners = netstat -ano | Select-String ":$port\s+.*LISTENING" | ForEach-Object {
+    ($_ -split "\s+")[-1]
+  } | Sort-Object -Unique
+
+  foreach ($id in $listeners) {
+    $process = Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue
+    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
+    $commandLine = $processInfo.CommandLine
+    $isSkipCastServer = $commandLine -and $commandLine.Contains($root.Path) -and $commandLine.Contains("server/index.ts")
+    if ($process -and $process.ProcessName -in @("node", "tsx") -and $isSkipCastServer) {
+      Stop-Process -Id ([int]$id) -Force
+      Write-Host "Stopped process $id listening on port $port"
+    }
+  }
+}
+
 Remove-Item -LiteralPath $processFile -Force -ErrorAction SilentlyContinue
 Write-Host "Stopped local SkipCast AI backend."

@@ -689,14 +689,21 @@ export function ImportWizard({
                     })}
                   </View>
                 )}
-                {spotifyMatches.length > 0 && (
-                  <IconButton icon={Upload} label="Save selected podcasts" onPress={importSpotifyMatches} disabled={disabled || !selectedSpotifyUrls.length} variant="primary" style={styles.fullButton} />
-                )}
               </>
             )}
           </ScrollView>
 
           <View style={styles.footer}>
+            {mode === 'names' && spotifyMatches.length > 0 && (
+              <IconButton
+                icon={Upload}
+                label="Save selected podcasts"
+                onPress={importSpotifyMatches}
+                disabled={disabled || !selectedSpotifyUrls.length}
+                variant="primary"
+                style={styles.footerButton}
+              />
+            )}
             {(working || busy) && <ActivityIndicator color="#2A9D8F" />}
             {progress && <Text style={styles.progressText}>{progress.completed}/{progress.total}</Text>}
             <Text accessibilityLiveRegion="polite" style={styles.statusText}>{status || (apiReachable ? 'Ready' : 'API unavailable')}</Text>
@@ -911,8 +918,12 @@ const styles = StyleSheet.create({
   footer: {
     minHeight: 24,
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: 8,
+  },
+  footerButton: {
+    width: '100%',
   },
   progressText: {
     color: '#0F766E',

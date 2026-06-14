@@ -60,9 +60,9 @@ GitHub Pages is static, so RSS and ad-scan features need the local API exposed t
 
 If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and asks the signed-in Codex CLI to classify the timestamped transcript. The first local run downloads the Whisper model and local scans are CPU-heavy; the launcher keeps the no-key phone demo to a 90-second opening scan so the Cloudflare tunnel does not time out.
 
-The launcher also creates a per-run analyze token, starts the API with `ALLOW_UNAUTHENTICATED_ANALYZE=false`, and passes that token into the Pages build. This is still only demo friction because public web bundles can be inspected, but it prevents anonymous direct calls to `/api/analyze` without the token.
+The launcher starts the API with `ALLOW_UNAUTHENTICATED_ANALYZE=false` and `ANALYZE_PUBLIC_SESSIONS=true`. The Pages app asks the API for a short-lived analysis session before it calls `/api/analyze`, so the browser bundle does not contain a reusable analyze token.
 
-The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it allows unauthenticated analysis but limits analysis to a small number of requests per hour; stop it when you are done:
+The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it limits analysis sessions, analysis requests, and concurrent scans to keep local usage bounded; stop it when you are done:
 
 ```powershell
 .\scripts\stop-local-ai-backend.ps1
@@ -76,7 +76,7 @@ To start the tunnel without redeploying Pages automatically:
 
 This tunnel setup is for testing. If the tunnel restarts, the backend URL changes and Pages must be redeployed.
 
-`eas.json` points native development, preview, and production builds at the same temporary tunnel so the current builds can use RSS/import features. Replace `EXPO_PUBLIC_API_URL` there with a permanent HTTPS API before shipping a real iOS or Android release.
+`eas.json` points native development and preview builds at the current temporary tunnel so test builds can use RSS/import features. Production native builds must set `EXPO_PUBLIC_API_URL` to a permanent HTTPS API before shipping a real iOS or Android release.
 
 ## AI Analysis
 
@@ -101,13 +101,13 @@ Use an OpenAI Platform API key on the private API server:
 ```powershell
 $env:CORS_ORIGINS="https://nolanbradberrysportfolio.github.io"
 $env:OPENAI_API_KEY="sk-..."
-$env:ANALYZE_API_TOKEN="choose-a-private-random-token"
+$env:ANALYZE_PUBLIC_SESSIONS="true"
 $env:OPENAI_TRANSCRIBE_MODEL="whisper-1"
 $env:OPENAI_AD_DETECTION_MODEL="gpt-4o-mini"
 npm run server:start
 ```
 
-For GitHub Pages builds that should call a token-protected analyzer, also set `EXPO_PUBLIC_ANALYZE_API_TOKEN` in the Pages build environment to the same token. Do not commit real keys or tokens.
+Optionally set `ANALYZE_API_TOKEN` on a private API server for admin or trusted server-to-server calls. Do not put that value in `EXPO_PUBLIC_*` variables because web, APK, and IPA users can extract bundled public values.
 
 OpenClaw/Codex OAuth can use a signed-in ChatGPT/Codex subscription for chat/model turns, and Codex CLI can classify text. On this install, OpenClaw's batch audio transcription path still routes through the regular OpenAI audio transcription provider, not the Codex chat route. That is why SkipCast uses either a Platform API key for OpenAI transcription or the local Whisper path above for no-key transcription, with optional Codex CLI text classification after a transcript exists.
 
@@ -115,8 +115,6 @@ The app stores timestamp metadata and seeks over ranges during foreground playba
 
 Production builds should set `EXPO_PUBLIC_API_URL` to a deployed HTTPS API. The default `localhost` URL is for local web development only.
 
-For a deployed API, set `CORS_ORIGINS` to the exact app origins allowed to call the server and tune `RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_MAX_CONCURRENT`, `MAX_EPISODES_PER_FEED`, `OPML_MAX_CHARS`, `OPML_MAX_NODES`, `OPML_MAX_DEPTH`, and `OPML_VALIDATE_CONCURRENCY` for your hosting/cost limits. In `NODE_ENV=production`, or whenever `OPENAI_API_KEY` is enabled without `ALLOW_ANY_CORS_ORIGIN=true`, the API refuses to start if `CORS_ORIGINS` is empty.
+For a deployed API, set `CORS_ORIGINS` to the exact app origins allowed to call the server and tune `RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_SESSION_MAX_REQUESTS`, `ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_RATE_LIMIT_MAX_REQUESTS`, `ANALYZE_MAX_CONCURRENT`, `MAX_EPISODES_PER_FEED`, `OPML_MAX_CHARS`, `OPML_MAX_NODES`, `OPML_MAX_DEPTH`, and `OPML_VALIDATE_CONCURRENCY` for your hosting/cost limits. In `NODE_ENV=production`, or whenever `OPENAI_API_KEY` is enabled without `ALLOW_ANY_CORS_ORIGIN=true`, the API refuses to start if `CORS_ORIGINS` is empty.
 
-For shared/private deployments, set `ANALYZE_API_TOKEN` on the API and the matching `EXPO_PUBLIC_ANALYZE_API_TOKEN` in the client build environment to reduce casual transcription spend abuse. The API now requires `ANALYZE_API_TOKEN` whenever `OPENAI_API_KEY` is set, unless `ALLOW_UNAUTHENTICATED_ANALYZE=true` is set for local development only.
-
-Do not treat `EXPO_PUBLIC_ANALYZE_API_TOKEN` as public-app authentication. Web, APK, and IPA users can extract bundled public values. A public release needs real user auth, per-user quotas, billing controls, and abuse monitoring around `/api/analyze`.
+The session system is a demo/public-beta guardrail, not full account security. A public release still needs real user auth, per-user quotas, billing controls, durable hosting, and abuse monitoring around `/api/analyze`.

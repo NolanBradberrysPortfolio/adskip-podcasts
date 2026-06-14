@@ -41,5 +41,21 @@ if ($port) {
   }
 }
 
+$repoTunnelProcesses = Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -and
+  $_.CommandLine.Contains($root.Path) -and
+  $_.CommandLine.Contains("cloudflared") -and
+  $_.CommandLine.Contains("tunnel --url")
+}
+
+foreach ($repoTunnelProcess in $repoTunnelProcesses) {
+  $id = [int]$repoTunnelProcess.ProcessId
+  $process = Get-Process -Id $id -ErrorAction SilentlyContinue
+  if ($process) {
+    Stop-Process -Id $id -Force
+    Write-Host "Stopped repo-owned Cloudflare tunnel process $id"
+  }
+}
+
 Remove-Item -LiteralPath $processFile -Force -ErrorAction SilentlyContinue
 Write-Host "Stopped local SkipCast AI backend."

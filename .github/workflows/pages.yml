@@ -10,10 +10,6 @@ on:
         description: Optional backend API URL for this Pages build.
         required: false
         type: string
-      analyze_token:
-        description: Optional public demo token for /api/analyze.
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -44,7 +40,6 @@ jobs:
         run: npm run export:pages
         env:
           EXPO_PUBLIC_API_URL: ${{ inputs.api_url || vars.EXPO_PUBLIC_API_URL }}
-          EXPO_PUBLIC_ANALYZE_API_TOKEN: ${{ inputs.analyze_token || secrets.EXPO_PUBLIC_ANALYZE_API_TOKEN }}
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

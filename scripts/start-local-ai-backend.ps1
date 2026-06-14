@@ -10,11 +10,12 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $runDir = Join-Path $root ".skipcast-local"
 $serverLog = Join-Path $runDir "server.log"
 $tunnelLog = Join-Path $runDir "cloudflared.log"
+$tunnelErrorLog = Join-Path $runDir "cloudflared.err.log"
 $serverScript = Join-Path $runDir "server-start.ps1"
 $origin = "https://nolanbradberrysportfolio.github.io"
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-Remove-Item -LiteralPath $serverLog, $tunnelLog, $serverScript -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $serverLog, $tunnelLog, $tunnelErrorLog, $serverScript -Force -ErrorAction SilentlyContinue
 
 if (-not $env:OPENAI_API_KEY) {
   Write-Host "OPENAI_API_KEY is not set. Starting local Whisper transcription instead."
@@ -29,6 +30,9 @@ if (-not $env:OPENAI_API_KEY) {
   }
   if (-not $env:LOCAL_WHISPER_MAX_SECONDS) {
     $env:LOCAL_WHISPER_MAX_SECONDS = "90"
+  }
+  if (-not $env:LOCAL_WHISPER_TIMEOUT_MS) {
+    $env:LOCAL_WHISPER_TIMEOUT_MS = "180000"
   }
   if ($env:SKIPCAST_DISABLE_CODEX_AD_DETECTION -ne "true") {
     $env:LOCAL_CODEX_AD_DETECTION = "true"
@@ -49,16 +53,6 @@ if (-not (Test-Path $cloudflared)) {
 
 $env:PORT = "$Port"
 $env:CORS_ORIGINS = $origin
-if (-not $env:ANALYZE_API_TOKEN) {
-  $tokenBytes = New-Object byte[] 24
-  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-  try {
-    $rng.GetBytes($tokenBytes)
-  } finally {
-    $rng.Dispose()
-  }
-  $env:ANALYZE_API_TOKEN = [Convert]::ToBase64String($tokenBytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
-}
 if (-not $env:OPENAI_TRANSCRIBE_MODEL) {
   $env:OPENAI_TRANSCRIBE_MODEL = "whisper-1"
 }
@@ -66,6 +60,15 @@ if (-not $env:OPENAI_AD_DETECTION_MODEL) {
   $env:OPENAI_AD_DETECTION_MODEL = "gpt-4o-mini"
 }
 $env:ALLOW_UNAUTHENTICATED_ANALYZE = "false"
+if (-not $env:ANALYZE_PUBLIC_SESSIONS) {
+  $env:ANALYZE_PUBLIC_SESSIONS = "true"
+}
+if (-not $env:ANALYZE_SESSION_MAX_REQUESTS) {
+  $env:ANALYZE_SESSION_MAX_REQUESTS = "3"
+}
+if (-not $env:ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS) {
+  $env:ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS = "12"
+}
 if (-not $env:ANALYZE_RATE_LIMIT_MAX_REQUESTS) {
   $env:ANALYZE_RATE_LIMIT_MAX_REQUESTS = "3"
 }
@@ -79,12 +82,16 @@ Set-Location '$root'
 `$env:CORS_ORIGINS = '$($env:CORS_ORIGINS)'
 `$env:ANALYZE_API_TOKEN = '$($env:ANALYZE_API_TOKEN)'
 `$env:ALLOW_UNAUTHENTICATED_ANALYZE = '$($env:ALLOW_UNAUTHENTICATED_ANALYZE)'
+`$env:ANALYZE_PUBLIC_SESSIONS = '$($env:ANALYZE_PUBLIC_SESSIONS)'
+`$env:ANALYZE_SESSION_MAX_REQUESTS = '$($env:ANALYZE_SESSION_MAX_REQUESTS)'
+`$env:ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS = '$($env:ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS)'
 `$env:OPENAI_TRANSCRIBE_MODEL = '$($env:OPENAI_TRANSCRIBE_MODEL)'
 `$env:OPENAI_AD_DETECTION_MODEL = '$($env:OPENAI_AD_DETECTION_MODEL)'
 `$env:LOCAL_WHISPER_TRANSCRIBE = '$($env:LOCAL_WHISPER_TRANSCRIBE)'
 `$env:LOCAL_WHISPER_MODEL = '$($env:LOCAL_WHISPER_MODEL)'
 `$env:LOCAL_WHISPER_MAX_AUDIO_MB = '$($env:LOCAL_WHISPER_MAX_AUDIO_MB)'
 `$env:LOCAL_WHISPER_MAX_SECONDS = '$($env:LOCAL_WHISPER_MAX_SECONDS)'
+`$env:LOCAL_WHISPER_TIMEOUT_MS = '$($env:LOCAL_WHISPER_TIMEOUT_MS)'
 `$env:LOCAL_CODEX_AD_DETECTION = '$($env:LOCAL_CODEX_AD_DETECTION)'
 `$env:CODEX_AD_DETECTION_TIMEOUT_MS = '$($env:CODEX_AD_DETECTION_TIMEOUT_MS)'
 `$env:ANALYZE_RATE_LIMIT_MAX_REQUESTS = '$($env:ANALYZE_RATE_LIMIT_MAX_REQUESTS)'
@@ -97,24 +104,29 @@ Write-Host "Starting SkipCast API on http://localhost:$Port ..."
 $serverProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& '$serverScript'") -WindowStyle Hidden -PassThru
 
 Write-Host "Starting Cloudflare tunnel ..."
-$tunnelArgs = "/c ""`"$cloudflared`" tunnel --url http://localhost:$Port --no-autoupdate 1> `"$tunnelLog`" 2>&1"""
-$tunnelProcess = Start-Process -FilePath "cmd.exe" -ArgumentList $tunnelArgs -WindowStyle Hidden -PassThru
+$tunnelProcess = Start-Process -FilePath $cloudflared -ArgumentList @("tunnel", "--url", "http://127.0.0.1:$Port", "--no-autoupdate") -RedirectStandardOutput $tunnelLog -RedirectStandardError $tunnelErrorLog -WindowStyle Hidden -PassThru
 
 $apiUrl = $null
 for ($attempt = 0; $attempt -lt 45; $attempt += 1) {
   Start-Sleep -Seconds 2
-  if (Test-Path $tunnelLog) {
-    $log = Get-Content -LiteralPath $tunnelLog -Raw -ErrorAction SilentlyContinue
-    if ($log -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
-      $apiUrl = $Matches[0]
-      break
+  foreach ($candidateLog in @($tunnelLog, $tunnelErrorLog)) {
+    if (Test-Path $candidateLog) {
+      $log = Get-Content -LiteralPath $candidateLog -Raw -ErrorAction SilentlyContinue
+      if ($log -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
+        $apiUrl = $Matches[0]
+        break
+      }
     }
+  }
+  if ($apiUrl) {
+    break
   }
 }
 
 if (-not $apiUrl) {
   Write-Host "Server log: $serverLog"
   Write-Host "Tunnel log: $tunnelLog"
+  Write-Host "Tunnel error log: $tunnelErrorLog"
   throw "Could not find the trycloudflare URL in the tunnel log."
 }
 
@@ -148,10 +160,10 @@ if (-not $healthy) {
 
 if ($NoDeploy) {
   Write-Host "Skipped GitHub Pages redeploy. To deploy manually:"
-  Write-Host "gh workflow run pages.yml --repo $Repo --ref main --field api_url=`"$apiUrl`" --field analyze_token=`"$env:ANALYZE_API_TOKEN`""
+  Write-Host "gh workflow run pages.yml --repo $Repo --ref main --field api_url=`"$apiUrl`""
 } else {
   Write-Host "Redeploying GitHub Pages to point at $apiUrl ..."
-  gh workflow run pages.yml --repo $Repo --ref main --field api_url="$apiUrl" --field analyze_token="$env:ANALYZE_API_TOKEN"
+  gh workflow run pages.yml --repo $Repo --ref main --field api_url="$apiUrl"
   Write-Host "Deploy started. Keep this computer awake while testing from your phone."
 }
 

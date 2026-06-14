@@ -4,7 +4,7 @@ import Parser from 'rss-parser';
 import OpenAI from 'openai';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { LookupOptions } from 'node:dns';
@@ -41,6 +41,11 @@ const ANALYZE_API_TOKEN = process.env.ANALYZE_API_TOKEN?.trim();
 const HAS_OPENAI_KEY = Boolean(process.env.OPENAI_API_KEY);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const ALLOW_UNAUTHENTICATED_ANALYZE = process.env.ALLOW_UNAUTHENTICATED_ANALYZE === 'true';
+const ANALYZE_PUBLIC_SESSIONS = process.env.ANALYZE_PUBLIC_SESSIONS ? process.env.ANALYZE_PUBLIC_SESSIONS === 'true' : !IS_PRODUCTION;
+const ANALYZE_SESSION_TTL_MS = readPositiveInteger('ANALYZE_SESSION_TTL_MINUTES', 12 * 60) * 60_000;
+const ANALYZE_SESSION_MAX_REQUESTS = readPositiveInteger('ANALYZE_SESSION_MAX_REQUESTS', 3);
+const ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS = readPositiveInteger('ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS', 60 * 60_000);
+const ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS = readPositiveInteger('ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS', 12);
 const ALLOW_ANY_CORS_ORIGIN = process.env.ALLOW_ANY_CORS_ORIGIN === 'true';
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
 const OPENAI_AD_DETECTION_MODEL = process.env.OPENAI_AD_DETECTION_MODEL || 'gpt-4o-mini';
@@ -48,7 +53,7 @@ const LOCAL_WHISPER_TRANSCRIBE = process.env.LOCAL_WHISPER_TRANSCRIBE === 'true'
 const LOCAL_WHISPER_MODEL = process.env.LOCAL_WHISPER_MODEL || 'Xenova/whisper-tiny.en';
 const LOCAL_WHISPER_MAX_AUDIO_BYTES = readPositiveInteger('LOCAL_WHISPER_MAX_AUDIO_MB', 96) * 1024 * 1024;
 const LOCAL_WHISPER_MAX_SECONDS = readPositiveInteger('LOCAL_WHISPER_MAX_SECONDS', 20 * 60);
-const LOCAL_WHISPER_TIMEOUT_MS = readPositiveInteger('LOCAL_WHISPER_TIMEOUT_MS', 85_000);
+const LOCAL_WHISPER_TIMEOUT_MS = readPositiveInteger('LOCAL_WHISPER_TIMEOUT_MS', 180_000);
 const FFMPEG_TIMEOUT_MS = readPositiveInteger('FFMPEG_TIMEOUT_MS', 30_000);
 const LOCAL_CODEX_AD_DETECTION = process.env.LOCAL_CODEX_AD_DETECTION === 'true';
 const CODEX_CLI = process.env.CODEX_CLI || 'codex';
@@ -95,8 +100,8 @@ if (HAS_OPENAI_KEY && !HAS_EXPLICIT_CORS && !ALLOW_ANY_CORS_ORIGIN) {
   throw new Error('CORS_ORIGINS must be set when OPENAI_API_KEY is enabled. Set ALLOW_ANY_CORS_ORIGIN=true only for local development.');
 }
 
-if (HAS_ANALYSIS_ENGINE && !ANALYZE_API_TOKEN && !ALLOW_UNAUTHENTICATED_ANALYZE) {
-  throw new Error('ANALYZE_API_TOKEN must be set when analysis is enabled. Set ALLOW_UNAUTHENTICATED_ANALYZE=true only for local development.');
+if (HAS_ANALYSIS_ENGINE && !ANALYZE_API_TOKEN && !ALLOW_UNAUTHENTICATED_ANALYZE && !ANALYZE_PUBLIC_SESSIONS) {
+  throw new Error('ANALYZE_API_TOKEN, ANALYZE_PUBLIC_SESSIONS, or ALLOW_UNAUTHENTICATED_ANALYZE must be enabled when analysis is available.');
 }
 const BLOCKED_IPV4_RANGES = [
   '0.0.0.0/8',
@@ -256,6 +261,11 @@ type SpotifyImportResult = {
   total: number;
 };
 
+type AnalyzeSession = {
+  expiresAt: number;
+  uses: number;
+};
+
 type ItunesSearchResult = {
   collectionName?: string;
   artistName?: string;
@@ -272,7 +282,10 @@ const spotifyImportSessions = new Map<string, SpotifyImportSession>();
 const spotifyImportResults = new Map<string, SpotifyImportResult>();
 const podcastSearchCache = new Map<string, { expiresAt: number; result?: ItunesSearchResult }>();
 const spotifyMatchRateBuckets = new Map<string, RateBucket>();
+const analyzeSessions = new Map<string, AnalyzeSession>();
+const analyzeSessionRateBuckets = new Map<string, RateBucket>();
 let nextSpotifyMatchRateLimitPruneAt = Date.now() + SPOTIFY_MATCH_RATE_LIMIT_WINDOW_MS;
+let nextAnalyzeSessionRateLimitPruneAt = Date.now() + ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS;
 
 const app = express();
 app.use(applyCors);
@@ -303,6 +316,11 @@ app.get('/api/health', (_request, response) => {
     localWhisperMaxSeconds: LOCAL_WHISPER_TRANSCRIBE ? LOCAL_WHISPER_MAX_SECONDS : undefined,
     localWhisperTimeoutMs: LOCAL_WHISPER_TRANSCRIBE ? LOCAL_WHISPER_TIMEOUT_MS : undefined,
     localCodexAdDetection: LOCAL_WHISPER_TRANSCRIBE ? LOCAL_CODEX_AD_DETECTION : undefined,
+    analysisSessions: {
+      enabled: HAS_ANALYSIS_ENGINE && ANALYZE_PUBLIC_SESSIONS,
+      maxRequests: ANALYZE_SESSION_MAX_REQUESTS,
+      ttlMinutes: Math.round(ANALYZE_SESSION_TTL_MS / 60_000),
+    },
   });
 });
 
@@ -474,16 +492,42 @@ app.post('/api/import/spotify/match', async (request, response) => {
   }
 });
 
-app.post('/api/analyze', async (request, response) => {
-  if (ANALYZE_API_TOKEN && request.header('x-skipcast-token') !== ANALYZE_API_TOKEN) {
-    response.status(401).json({ error: 'Analysis token required' });
+app.post('/api/analyze/session', (_request, response) => {
+  if (!HAS_ANALYSIS_ENGINE || !ANALYZE_PUBLIC_SESSIONS) {
+    response.status(503).json({ error: 'Analysis sessions unavailable' });
     return;
   }
+
+  if (!takeAnalyzeSessionRateLimit(_request, response)) {
+    return;
+  }
+
+  pruneAnalyzeSessions();
+  const token = base64Url(randomBytes(24));
+  const expiresAt = Date.now() + ANALYZE_SESSION_TTL_MS;
+  analyzeSessions.set(hashAnalyzeSessionToken(token), {
+    expiresAt,
+    uses: 0,
+  });
+
+  response.json({
+    token,
+    expiresAt: new Date(expiresAt).toISOString(),
+    remaining: ANALYZE_SESSION_MAX_REQUESTS,
+  });
+});
+
+app.post('/api/analyze', async (request, response) => {
+  const hasPrivateAnalyzeToken = Boolean(ANALYZE_API_TOKEN && request.header('x-skipcast-token') === ANALYZE_API_TOKEN);
 
   const parsed = analyzeSchema.safeParse(request.body);
 
   if (!parsed.success) {
     response.status(400).json({ error: 'Invalid analysis payload' });
+    return;
+  }
+
+  if (HAS_ANALYSIS_ENGINE && !hasPrivateAnalyzeToken && !ALLOW_UNAUTHENTICATED_ANALYZE && !takeAnalyzeSession(request, response)) {
     return;
   }
 
@@ -561,7 +605,7 @@ function applyCors(request: express.Request, response: express.Response, next: e
   if (origin && (ALLOWED_CORS_ORIGINS.includes(origin) || ALLOW_PERMISSIVE_CORS)) {
     response.setHeader('Access-Control-Allow-Origin', origin);
     response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-skipcast-token');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-skipcast-token, x-skipcast-session');
     response.setHeader('Vary', 'Origin');
   }
 
@@ -603,6 +647,50 @@ function takeAnalyzeRateLimit(request: express.Request, response: express.Respon
   return false;
 }
 
+function takeAnalyzeSessionRateLimit(request: express.Request, response: express.Response): boolean {
+  const now = Date.now();
+  if (now >= nextAnalyzeSessionRateLimitPruneAt) {
+    pruneRateBuckets(analyzeSessionRateBuckets, now);
+    nextAnalyzeSessionRateLimitPruneAt = now + ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS;
+  }
+
+  if (takeRateLimitSlot(analyzeSessionRateBuckets, rateLimitKey(request), now, ANALYZE_SESSION_RATE_LIMIT_WINDOW_MS, ANALYZE_SESSION_RATE_LIMIT_MAX_REQUESTS)) {
+    return true;
+  }
+
+  response.status(429).json({ error: 'Analysis session rate limit exceeded' });
+  return false;
+}
+
+function takeAnalyzeSession(request: express.Request, response: express.Response): boolean {
+  const token = String(request.header('x-skipcast-session') || '').trim();
+
+  if (!token) {
+    response.status(401).json({ error: 'Analysis session required' });
+    return false;
+  }
+
+  pruneAnalyzeSessions();
+  const tokenHash = hashAnalyzeSessionToken(token);
+  const session = analyzeSessions.get(tokenHash);
+  const now = Date.now();
+
+  if (!session || session.expiresAt <= now) {
+    analyzeSessions.delete(tokenHash);
+    response.status(401).json({ error: 'Analysis session expired' });
+    return false;
+  }
+
+  if (session.uses >= ANALYZE_SESSION_MAX_REQUESTS) {
+    analyzeSessions.delete(tokenHash);
+    response.status(429).json({ error: 'Analysis session quota exceeded' });
+    return false;
+  }
+
+  session.uses += 1;
+  return true;
+}
+
 function takeSpotifyMatchRateLimit(request: express.Request, response: express.Response): boolean {
   const now = Date.now();
   if (now >= nextSpotifyMatchRateLimitPruneAt) {
@@ -616,6 +704,18 @@ function takeSpotifyMatchRateLimit(request: express.Request, response: express.R
 
   response.status(429).json({ error: 'Spotify import rate limit exceeded' });
   return false;
+}
+
+function hashAnalyzeSessionToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function pruneAnalyzeSessions(now = Date.now()): void {
+  for (const [tokenHash, session] of analyzeSessions.entries()) {
+    if (session.expiresAt <= now) {
+      analyzeSessions.delete(tokenHash);
+    }
+  }
 }
 
 function reserveSpotifyImportSessionSlot(response: express.Response): boolean {

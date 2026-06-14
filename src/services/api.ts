@@ -2,7 +2,8 @@ import type { AnalysisResult, ImportFeedCandidate, PodcastEpisode, PodcastFeed, 
 
 const DEFAULT_API_URL = 'http://localhost:4300';
 const isProduction = process.env.NODE_ENV === 'production';
-const ANALYZE_API_TOKEN = process.env.EXPO_PUBLIC_ANALYZE_API_TOKEN;
+const ANALYSIS_SESSION_STORAGE_KEY = 'skipcast.analysisSession';
+const ANALYSIS_SESSION_REFRESH_SKEW_MS = 30_000;
 
 export const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || (isProduction ? '' : DEFAULT_API_URL);
 
@@ -19,7 +20,41 @@ export type ApiHealth = {
   maxTranscriptionAudioMb: number;
   localWhisperMaxAudioMb?: number;
   localWhisperMaxSeconds?: number;
+  analysisSessions?: {
+    enabled: boolean;
+    maxRequests: number;
+    ttlMinutes: number;
+  };
 };
+
+type BrowserStorage = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+};
+
+type AnalysisSessionResponse = {
+  token: string;
+  expiresAt: string;
+  remaining: number;
+};
+
+type CachedAnalysisSession = {
+  token: string;
+  expiresAtMs: number;
+};
+
+class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+  }
+}
+
+let cachedAnalysisSession: CachedAnalysisSession | null = readCachedAnalysisSession();
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   if (!API_BASE_URL) {
@@ -38,10 +73,101 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const payload = await response.json().catch(() => null);
 
   if (!response.ok) {
-    throw new Error(payload?.error || payload?.message || `Request failed with ${response.status}`);
+    throw new ApiRequestError(payload?.error || payload?.message || `Request failed with ${response.status}`, response.status);
   }
 
   return payload as T;
+}
+
+function getBrowserStorage(): BrowserStorage | undefined {
+  try {
+    if (typeof globalThis === 'undefined' || !('localStorage' in globalThis)) {
+      return undefined;
+    }
+
+    return (globalThis as unknown as { localStorage?: BrowserStorage }).localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function readCachedAnalysisSession(): CachedAnalysisSession | null {
+  const storage = getBrowserStorage();
+
+  if (!storage) {
+    return null;
+  }
+
+  try {
+    const raw = storage.getItem(ANALYSIS_SESSION_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<CachedAnalysisSession>;
+    if (typeof parsed.token !== 'string' || typeof parsed.expiresAtMs !== 'number') {
+      storage.removeItem(ANALYSIS_SESSION_STORAGE_KEY);
+      return null;
+    }
+
+    return parsed as CachedAnalysisSession;
+  } catch {
+    storage.removeItem(ANALYSIS_SESSION_STORAGE_KEY);
+    return null;
+  }
+}
+
+function writeCachedAnalysisSession(session: CachedAnalysisSession): void {
+  cachedAnalysisSession = session;
+
+  try {
+    getBrowserStorage()?.setItem(ANALYSIS_SESSION_STORAGE_KEY, JSON.stringify(session));
+  } catch {
+    // Browser privacy settings can deny storage. The in-memory session still works for the current tab.
+  }
+}
+
+function clearCachedAnalysisSession(): void {
+  cachedAnalysisSession = null;
+
+  try {
+    getBrowserStorage()?.removeItem(ANALYSIS_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+}
+
+function hasFreshAnalysisSession(session: CachedAnalysisSession | null): session is CachedAnalysisSession {
+  return Boolean(session && session.expiresAtMs - ANALYSIS_SESSION_REFRESH_SKEW_MS > Date.now());
+}
+
+async function fetchAnalysisSession(): Promise<CachedAnalysisSession> {
+  const session = await requestJson<AnalysisSessionResponse>('/api/analyze/session', {
+    method: 'POST',
+  });
+  const cachedSession = {
+    token: session.token,
+    expiresAtMs: Date.parse(session.expiresAt),
+  };
+
+  writeCachedAnalysisSession(cachedSession);
+  return cachedSession;
+}
+
+async function getAnalysisSession(forceRefresh = false): Promise<CachedAnalysisSession> {
+  if (!forceRefresh && hasFreshAnalysisSession(cachedAnalysisSession)) {
+    return cachedAnalysisSession;
+  }
+
+  return fetchAnalysisSession();
+}
+
+function canFallbackWithoutAnalysisSession(error: unknown): boolean {
+  return error instanceof ApiRequestError && (error.status === 404 || error.status === 503);
+}
+
+function shouldRefreshAnalysisSession(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status === 401;
 }
 
 export function fetchPodcastFeed(feedUrl: string): Promise<PodcastFeed> {
@@ -89,18 +215,41 @@ export function spotifyConnectUrl(returnTo: string): string {
   return `${API_BASE_URL}/api/import/spotify/start?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
-export function analyzeEpisode(episode: PodcastEpisode, knownDuration?: number): Promise<AnalysisResult> {
-  return requestJson<AnalysisResult>('/api/analyze', {
-    method: 'POST',
-    headers: ANALYZE_API_TOKEN ? { 'x-skipcast-token': ANALYZE_API_TOKEN } : undefined,
-    body: JSON.stringify({
-      episodeId: episode.id,
-      title: episode.title,
-      podcastTitle: episode.podcastTitle,
-      audioUrl: episode.audioUrl,
-      audioType: episode.audioType,
-      audioLength: episode.audioLength,
-      duration: knownDuration || episode.duration,
-    }),
+export async function analyzeEpisode(episode: PodcastEpisode, knownDuration?: number): Promise<AnalysisResult> {
+  const body = JSON.stringify({
+    episodeId: episode.id,
+    title: episode.title,
+    podcastTitle: episode.podcastTitle,
+    audioUrl: episode.audioUrl,
+    audioType: episode.audioType,
+    audioLength: episode.audioLength,
+    duration: knownDuration || episode.duration,
   });
+
+  const requestAnalysis = (session?: CachedAnalysisSession) => requestJson<AnalysisResult>('/api/analyze', {
+    method: 'POST',
+    headers: session ? { 'x-skipcast-session': session.token } : undefined,
+    body,
+  });
+
+  let session: CachedAnalysisSession | undefined;
+
+  try {
+    session = await getAnalysisSession();
+  } catch (error) {
+    if (!canFallbackWithoutAnalysisSession(error)) {
+      throw error;
+    }
+  }
+
+  try {
+    return await requestAnalysis(session);
+  } catch (error) {
+    if (session && shouldRefreshAnalysisSession(error)) {
+      clearCachedAnalysisSession();
+      return requestAnalysis(await getAnalysisSession(true));
+    }
+
+    throw error;
+  }
 }

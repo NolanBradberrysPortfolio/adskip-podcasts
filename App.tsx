@@ -626,34 +626,34 @@ export default function App() {
 
   const runAnalysis = async () => {
     if (!selectedEpisode) {
-      return;
+      return false;
     }
 
     if (apiStatus === 'api-offline' || apiStatus === 'checking') {
       const nextMessage = apiStatus === 'checking' ? 'API health check is still running' : 'Analysis unavailable: API offline';
       setMessage(nextMessage);
       setAnalysisMessage(nextMessage);
-      return;
+      return false;
     }
 
     if (!canAnalyze) {
       const nextMessage = 'Analysis unavailable: AI scanner is offline';
       setMessage(nextMessage);
       setAnalysisMessage(nextMessage);
-      return;
+      return false;
     }
 
     if (!analysisConsentGranted) {
       setAnalysisConsentOpen(true);
-      return;
+      return false;
     }
 
-    await performAnalysis();
+    return await performAnalysis();
   };
 
   const performAnalysis = async () => {
     if (!selectedEpisode) {
-      return;
+      return false;
     }
 
     setAnalyzing(true);
@@ -668,10 +668,12 @@ export default function App() {
       });
       setMessage(result.message);
       setAnalysisMessage(result.message);
+      return true;
     } catch (error) {
       const nextMessage = error instanceof Error ? error.message : 'Analysis failed';
       setMessage(nextMessage);
       setAnalysisMessage(nextMessage);
+      return false;
     } finally {
       setAnalyzing(false);
     }

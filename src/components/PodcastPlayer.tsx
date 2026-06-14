@@ -20,7 +20,7 @@ type Props = {
   episode?: PodcastEpisode;
   segments: AdSegment[];
   analyzing: boolean;
-  onAnalyze: () => Promise<void> | void;
+  onAnalyze: () => Promise<boolean> | boolean;
   onUndoSkip: () => void;
   canAnalyze?: boolean;
   analysisUnavailableLabel?: string;
@@ -76,6 +76,7 @@ export function PodcastPlayer({
   const [autoSkip, setAutoSkip] = useState(true);
   const [rate, setRate] = useState(1);
   const [timelineFocused, setTimelineFocused] = useState(false);
+  const [preparingPlayback, setPreparingPlayback] = useState(false);
   const lastSkipped = useRef<AdSegment | null>(null);
   const skippedIds = useRef(new Set<string>());
 
@@ -97,7 +98,7 @@ export function PodcastPlayer({
   const status = useAudioPlayerStatus(player);
   const hasSkipSegments = segments.length > 0;
   const effectiveAutoSkip = autoSkip && hasSkipSegments;
-  const showSkipTools = canAnalyze || hasSkipSegments || analyzing;
+  const showSkipTools = canAnalyze || hasSkipSegments || analyzing || preparingPlayback;
 
   useEffect(() => {
     setAudioModeAsync({
@@ -110,6 +111,7 @@ export function PodcastPlayer({
   useEffect(() => {
     skippedIds.current = new Set();
     lastSkipped.current = null;
+    setPreparingPlayback(false);
   }, [episode?.id]);
 
   useEffect(() => {
@@ -187,6 +189,16 @@ export function PodcastPlayer({
     if (status.playing) {
       player.pause();
       return;
+    }
+
+    if (!hasSkipSegments && canAnalyze) {
+      setPreparingPlayback(true);
+      const completed = await onAnalyze();
+      setPreparingPlayback(false);
+
+      if (!completed) {
+        return;
+      }
     }
 
     player.setActiveForLockScreen(true, {
@@ -303,8 +315,15 @@ export function PodcastPlayer({
         <Pressable accessibilityRole="button" accessibilityLabel="Back 15 seconds" onPress={skipBack} style={styles.roundControl}>
           <RotateCcw size={22} color="#122620" />
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel={status.playing ? 'Pause' : 'Play'} onPress={playPause} style={styles.playControl}>
-          {status.playing ? <Pause size={30} color="#F8FAF7" fill="#F8FAF7" /> : <Play size={30} color="#F8FAF7" fill="#F8FAF7" />}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={preparingPlayback ? 'Preparing playback' : status.playing ? 'Pause' : 'Play'}
+          accessibilityState={{ disabled: preparingPlayback }}
+          disabled={preparingPlayback}
+          onPress={playPause}
+          style={[styles.playControl, preparingPlayback && styles.playControlDisabled]}
+        >
+          {preparingPlayback ? <ActivityIndicator color="#F8FAF7" /> : status.playing ? <Pause size={30} color="#F8FAF7" fill="#F8FAF7" /> : <Play size={30} color="#F8FAF7" fill="#F8FAF7" />}
         </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Forward 30 seconds" onPress={skipAhead} style={styles.roundControl}>
           <SkipForward size={22} color="#122620" />
@@ -342,9 +361,9 @@ export function PodcastPlayer({
             </Pressable>
             <IconButton
               icon={ScanLine}
-              label={analyzing ? 'Analyzing' : canAnalyze ? 'Analyze' : analysisUnavailableLabel}
+              label={analyzing || preparingPlayback ? 'Analyzing' : canAnalyze ? 'Analyze' : analysisUnavailableLabel}
               onPress={onAnalyze}
-              disabled={analyzing || !canAnalyze}
+              disabled={analyzing || preparingPlayback || !canAnalyze}
             />
             <IconButton icon={RotateCcw} label="Undo skip" onPress={undoSkip} disabled={!lastSkipped.current} variant="ghost" />
           </View>
@@ -541,6 +560,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#122620',
+  },
+  playControlDisabled: {
+    opacity: 0.78,
   },
   playerTools: {
     flexDirection: 'row',

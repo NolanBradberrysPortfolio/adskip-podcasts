@@ -681,9 +681,21 @@ export default function App() {
     setSelectedEpisodeId(episode.id);
 
     if (!isWide) {
-      setTimeout(() => {
+      const scrollToPlayer = () => {
+        if (Platform.OS === 'web' && typeof document !== 'undefined') {
+          if (document.activeElement instanceof HTMLElement) {
+            document.activeElement.blur();
+          }
+
+          document.querySelector('[data-testid="player-panel"]')?.scrollIntoView({ behavior: 'auto', block: 'center' });
+          return;
+        }
+
         scrollRef.current?.scrollTo({ y: 0, animated: true });
-      }, 50);
+      };
+
+      setTimeout(scrollToPlayer, 80);
+      setTimeout(scrollToPlayer, 220);
     }
   };
 

@@ -20,7 +20,7 @@ type Props = {
   episode?: PodcastEpisode;
   segments: AdSegment[];
   analyzing: boolean;
-  onAnalyze: () => void;
+  onAnalyze: () => Promise<void> | void;
   onUndoSkip: () => void;
   canAnalyze?: boolean;
   analysisUnavailableLabel?: string;
@@ -186,7 +186,7 @@ export function PodcastPlayer({
     setAutoSkip((value) => !value);
   };
 
-  const playPause = () => {
+  const playPause = async () => {
     if (!episode) {
       return;
     }
@@ -202,7 +202,7 @@ export function PodcastPlayer({
       artworkUrl: episode.artworkUrl,
     });
     if (canAnalyze && !hasSkipSegments && !analyzing) {
-      onAnalyze();
+      await onAnalyze();
     }
     player.play();
   };

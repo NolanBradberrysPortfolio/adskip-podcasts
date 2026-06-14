@@ -58,7 +58,7 @@ GitHub Pages is static, so RSS and ad-scan features need the local API exposed t
 .\scripts\start-local-ai-backend.ps1
 ```
 
-If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and uses transcript cues to find likely ad reads in the opening scan window. The first local run downloads the Whisper model and local scans are CPU-heavy; the launcher keeps the no-key phone demo to a short opening scan so the Cloudflare tunnel does not time out.
+If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and asks the signed-in Codex CLI to classify the timestamped transcript. The first local run downloads the Whisper model and local scans are CPU-heavy; the launcher keeps the no-key phone demo to a 90-second opening scan so the Cloudflare tunnel does not time out.
 
 The launcher also creates a per-run analyze token, starts the API with `ALLOW_UNAUTHENTICATED_ANALYZE=false`, and passes that token into the Pages build. This is still only demo friction because public web bundles can be inspected, but it prevents anonymous direct calls to `/api/analyze` without the token.
 
@@ -92,7 +92,7 @@ $env:LOCAL_WHISPER_MAX_SECONDS="1200"
 npm run server:start
 ```
 
-Local Whisper scans only the first `LOCAL_WHISPER_MAX_SECONDS` of an episode, defaults to the small `Xenova/whisper-tiny.en` model, and uses transcript cue rules for likely sponsor segments. It is useful for a private local demo, not a production-scale analyzer. Set `LOCAL_CODEX_AD_DETECTION=true` to ask the signed-in Codex CLI to classify transcript windows after local Whisper; this uses the local Codex login but may be too slow for a Cloudflare quick tunnel.
+Local Whisper scans only the first `LOCAL_WHISPER_MAX_SECONDS` of an episode, defaults to the small `Xenova/whisper-tiny.en` model, and can use transcript cue rules for likely sponsor segments. It is useful for a private local demo, not a production-scale analyzer. Set `LOCAL_CODEX_AD_DETECTION=true` to ask the signed-in Codex CLI to classify transcript windows after local Whisper; the GitHub Pages quick-tunnel launcher enables this by default and caps the opening scan to 90 seconds.
 
 If no analysis engine is enabled or the episode audio is too large, the API returns `unavailable` with no skip segments. The app does not auto-skip fake timestamps.
 

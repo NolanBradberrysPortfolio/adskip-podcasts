@@ -28,7 +28,7 @@ if (-not $env:OPENAI_API_KEY) {
     $env:LOCAL_WHISPER_MAX_AUDIO_MB = "20"
   }
   if (-not $env:LOCAL_WHISPER_MAX_SECONDS) {
-    $env:LOCAL_WHISPER_MAX_SECONDS = "180"
+    $env:LOCAL_WHISPER_MAX_SECONDS = "90"
   }
   if ($env:SKIPCAST_DISABLE_CODEX_AD_DETECTION -ne "true") {
     $env:LOCAL_CODEX_AD_DETECTION = "true"

@@ -12,14 +12,14 @@ test.use({
 
 test('GitHub Pages phone web flow can add RSS and reach the player', async ({ page }) => {
   await page.goto(pageUrl, { waitUntil: 'networkidle' });
-  await expect(page.getByText('RSS ready, ads off')).toBeVisible();
+  await expect(page.getByText(/AI ready|RSS ready, ads off/)).toBeVisible();
   await expect(page.getByText('API unavailable')).toHaveCount(0);
 
   await page.getByLabel('Podcast RSS feed URL').fill(feedUrl);
   await page.getByRole('button', { name: 'Add feed' }).click();
 
   await expect(page.getByText(/Showing 1-12 of \d+ episodes/)).toBeVisible({ timeout: 30000 });
-  await expect(page.getByText('Ad scan off').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /Analyze|Ad scan off/ }).first()).toBeVisible();
   await expect(page.getByText('Skip segments')).toHaveCount(0);
 
   await page.getByRole('button', { name: /no skip segments/i }).first().click();

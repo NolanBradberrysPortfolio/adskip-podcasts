@@ -52,12 +52,13 @@ The public web app is deployed to GitHub Pages:
 https://nolanbradberrysportfolio.github.io/adskip-podcasts/
 ```
 
-GitHub Pages is static, so RSS and ad-scan features need the local API exposed through HTTPS. For a temporary phone demo with ad skipping, keep this computer awake, set a private OpenAI Platform API key in PowerShell, then run the launcher:
+GitHub Pages is static, so RSS and ad-scan features need the local API exposed through HTTPS. For a temporary phone demo with ad skipping, keep this computer awake and run the launcher:
 
 ```powershell
-$env:OPENAI_API_KEY="sk-..."
 .\scripts\start-local-ai-backend.ps1
 ```
+
+If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and uses transcript cues to find likely ad reads. The first local run downloads the Whisper model and local scans are CPU-heavy.
 
 The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it allows unauthenticated analysis but limits analysis to a small number of requests per hour; stop it when you are done:
 
@@ -79,7 +80,19 @@ This tunnel setup is for testing. If the tunnel restarts, the backend URL change
 
 If `OPENAI_API_KEY` is set, `/api/analyze` downloads audio files under `MAX_TRANSCRIPTION_AUDIO_MB`, transcribes them with `OPENAI_TRANSCRIBE_MODEL`, then uses `OPENAI_AD_DETECTION_MODEL` to classify timestamped transcript windows into ad ranges. The default setup keeps `whisper-1` for timestamped transcription and uses `gpt-4o-mini` for the small ad-detection pass.
 
-If no key is set or the episode audio is too large, the API returns `unavailable` with no skip segments. The app does not auto-skip fake timestamps.
+If no key is set, set `LOCAL_WHISPER_TRANSCRIBE=true` to run no-API-key local Whisper transcription on this computer:
+
+```powershell
+$env:LOCAL_WHISPER_TRANSCRIBE="true"
+$env:LOCAL_WHISPER_MODEL="Xenova/whisper-tiny.en"
+$env:LOCAL_WHISPER_MAX_AUDIO_MB="120"
+$env:LOCAL_WHISPER_MAX_SECONDS="1200"
+npm run server:start
+```
+
+Local Whisper scans only the first `LOCAL_WHISPER_MAX_SECONDS` of an episode, defaults to the small `Xenova/whisper-tiny.en` model, and uses transcript cue rules for likely sponsor segments. It is useful for a private local demo, not a production-scale analyzer.
+
+If no analysis engine is enabled or the episode audio is too large, the API returns `unavailable` with no skip segments. The app does not auto-skip fake timestamps.
 
 Use an OpenAI Platform API key on the private API server:
 
@@ -94,7 +107,7 @@ npm run server:start
 
 For GitHub Pages builds that should call a token-protected analyzer, also set `EXPO_PUBLIC_ANALYZE_API_TOKEN` in the Pages build environment to the same token. Do not commit real keys or tokens.
 
-ChatGPT Plus/Pro is not enough for this backend by itself. OpenAI API usage is billed separately from ChatGPT subscriptions, so the backend needs a Platform API key with API billing enabled.
+OpenClaw/Codex OAuth can use a signed-in ChatGPT/Codex subscription for chat/model turns, and Codex CLI can classify text. On this install, OpenClaw's batch audio transcription path still routes through the regular OpenAI audio transcription provider, not the Codex chat route. That is why SkipCast uses either a Platform API key for OpenAI transcription or the local Whisper path above for no-key transcription.
 
 The app stores timestamp metadata and seeks over ranges during foreground playback. It does not redistribute edited copies of podcast audio.
 

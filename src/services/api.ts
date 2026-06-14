@@ -9,9 +9,16 @@ export const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || (isProduction ? '
 export type ApiHealth = {
   ok: boolean;
   openai: boolean;
+  localWhisper?: boolean;
+  analysisEngines?: {
+    openai?: boolean;
+    localWhisper?: boolean;
+  };
   transcribeModel?: string;
   adDetectionModel?: string;
   maxTranscriptionAudioMb: number;
+  localWhisperMaxAudioMb?: number;
+  localWhisperMaxSeconds?: number;
 };
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {

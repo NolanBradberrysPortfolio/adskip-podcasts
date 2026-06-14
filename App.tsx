@@ -16,7 +16,7 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Clock, ListMusic, Plus, Radio, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react-native';
-import { analyzeEpisode, fetchApiHealth, fetchPodcastFeed } from './src/services/api';
+import { analyzeEpisode, fetchApiHealth, fetchPodcastFeed, type ApiHealth } from './src/services/api';
 import { loadSavedFeeds, loadSavedSegments, saveFeeds, saveSegments } from './src/storage/subscriptions';
 import type { AdSegment, PodcastEpisode, PodcastFeed } from './src/types';
 import { formatDate, formatDuration } from './src/utils/format';
@@ -234,6 +234,10 @@ function spotifyImportParamsFromUrl(rawUrl: string): { token?: string; error?: s
   }
 }
 
+function hasAnalysisEngine(health: ApiHealth): boolean {
+  return Boolean(health.openai || health.localWhisper || health.analysisEngines?.openai || health.analysisEngines?.localWhisper);
+}
+
 export default function App() {
   const { width, height } = useWindowDimensions();
   const isWide = width >= WIDE_BREAKPOINT;
@@ -373,7 +377,7 @@ export default function App() {
 
     try {
       const health = await fetchApiHealth();
-      setApiStatus(health.openai ? 'ready' : 'ai-offline');
+      setApiStatus(hasAnalysisEngine(health) ? 'ready' : 'ai-offline');
     } catch (error) {
       setApiStatus('api-offline');
       setMessage(error instanceof Error ? error.message : 'API unavailable');
@@ -383,7 +387,7 @@ export default function App() {
   useEffect(() => {
     fetchApiHealth()
       .then((health) => {
-        setApiStatus(health.openai ? 'ready' : 'ai-offline');
+        setApiStatus(hasAnalysisEngine(health) ? 'ready' : 'ai-offline');
       })
       .catch((error) => {
         setApiStatus('api-offline');

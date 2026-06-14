@@ -3,9 +3,10 @@ import express from 'express';
 import Parser from 'rss-parser';
 import OpenAI from 'openai';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import type { LookupOptions } from 'node:dns';
 import dns from 'node:dns/promises';
 import type { IncomingHttpHeaders, IncomingMessage, RequestOptions } from 'node:http';
@@ -25,7 +26,7 @@ const MAX_AUDIO_BYTES = readPositiveInteger('MAX_TRANSCRIPTION_AUDIO_MB', 24) * 
 const MAX_FEED_BYTES = readPositiveInteger('MAX_FEED_XML_MB', 3) * 1024 * 1024;
 const MAX_EPISODES_PER_FEED = readPositiveInteger('MAX_EPISODES_PER_FEED', 150);
 const FETCH_TIMEOUT_MS = readPositiveInteger('FETCH_TIMEOUT_MS', 15000);
-const MAX_REDIRECTS = 4;
+const MAX_REDIRECTS = readPositiveInteger('MAX_REDIRECTS', 8);
 const RATE_LIMIT_WINDOW_MS = readPositiveInteger('RATE_LIMIT_WINDOW_MS', 60_000);
 const RATE_LIMIT_MAX_REQUESTS = readPositiveInteger('RATE_LIMIT_MAX_REQUESTS', 80);
 const ANALYZE_RATE_LIMIT_WINDOW_MS = readPositiveInteger('ANALYZE_RATE_LIMIT_WINDOW_MS', 60 * 60_000);
@@ -42,6 +43,10 @@ const ALLOW_UNAUTHENTICATED_ANALYZE = process.env.ALLOW_UNAUTHENTICATED_ANALYZE 
 const ALLOW_ANY_CORS_ORIGIN = process.env.ALLOW_ANY_CORS_ORIGIN === 'true';
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
 const OPENAI_AD_DETECTION_MODEL = process.env.OPENAI_AD_DETECTION_MODEL || 'gpt-4o-mini';
+const LOCAL_WHISPER_TRANSCRIBE = process.env.LOCAL_WHISPER_TRANSCRIBE === 'true';
+const LOCAL_WHISPER_MODEL = process.env.LOCAL_WHISPER_MODEL || 'Xenova/whisper-tiny.en';
+const LOCAL_WHISPER_MAX_AUDIO_BYTES = readPositiveInteger('LOCAL_WHISPER_MAX_AUDIO_MB', 96) * 1024 * 1024;
+const LOCAL_WHISPER_MAX_SECONDS = readPositiveInteger('LOCAL_WHISPER_MAX_SECONDS', 20 * 60);
 const AD_DETECTION_WINDOW_SECONDS = readPositiveInteger('AD_DETECTION_WINDOW_SECONDS', 12 * 60);
 const AD_DETECTION_MAX_WINDOWS = readPositiveInteger('AD_DETECTION_MAX_WINDOWS', 8);
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID?.trim();
@@ -66,6 +71,7 @@ const ALLOW_PERMISSIVE_CORS = !HAS_EXPLICIT_CORS && ALLOW_ANY_CORS_ORIGIN;
 const ALLOWED_CORS_ORIGINS = [...CORS_ORIGINS, GITHUB_PAGES_ORIGIN, ...LOCAL_DEV_ORIGINS];
 const SPOTIFY_IMPORT_CONFIGURED = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REDIRECT_URI);
 const GITHUB_PAGES_APP_URL = `${GITHUB_PAGES_ORIGIN}/adskip-podcasts/`;
+const HAS_ANALYSIS_ENGINE = HAS_OPENAI_KEY || LOCAL_WHISPER_TRANSCRIBE;
 
 if (IS_PRODUCTION && !HAS_EXPLICIT_CORS) {
   throw new Error('CORS_ORIGINS must be set in production.');
@@ -83,8 +89,8 @@ if (HAS_OPENAI_KEY && !HAS_EXPLICIT_CORS && !ALLOW_ANY_CORS_ORIGIN) {
   throw new Error('CORS_ORIGINS must be set when OPENAI_API_KEY is enabled. Set ALLOW_ANY_CORS_ORIGIN=true only for local development.');
 }
 
-if (HAS_OPENAI_KEY && !ANALYZE_API_TOKEN && !ALLOW_UNAUTHENTICATED_ANALYZE) {
-  throw new Error('ANALYZE_API_TOKEN must be set when OPENAI_API_KEY is enabled. Set ALLOW_UNAUTHENTICATED_ANALYZE=true only for local development.');
+if (HAS_ANALYSIS_ENGINE && !ANALYZE_API_TOKEN && !ALLOW_UNAUTHENTICATED_ANALYZE) {
+  throw new Error('ANALYZE_API_TOKEN must be set when analysis is enabled. Set ALLOW_UNAUTHENTICATED_ANALYZE=true only for local development.');
 }
 const BLOCKED_IPV4_RANGES = [
   '0.0.0.0/8',
@@ -159,6 +165,20 @@ type TranscriptSegment = {
   end: number;
   text: string;
 };
+
+type AnalysisEngine = 'openai' | 'local-whisper';
+
+type LocalWhisperChunk = {
+  timestamp?: [number | null, number | null];
+  text?: string;
+};
+
+type LocalWhisperOutput = {
+  text?: string;
+  chunks?: LocalWhisperChunk[];
+};
+
+type LocalWhisperTranscriber = (audio: Float32Array, options: { return_timestamps: true }) => Promise<LocalWhisperOutput>;
 
 const AD_SEGMENT_CATEGORIES = ['host_read_ad', 'dynamic_ad', 'network_promo', 'self_promo', 'intro', 'outro'] as const satisfies readonly SegmentCategory[];
 
@@ -258,9 +278,16 @@ app.get('/api/health', (_request, response) => {
   response.json({
     ok: true,
     openai: HAS_OPENAI_KEY,
-    transcribeModel: OPENAI_TRANSCRIBE_MODEL,
-    adDetectionModel: HAS_OPENAI_KEY ? OPENAI_AD_DETECTION_MODEL : undefined,
+    localWhisper: LOCAL_WHISPER_TRANSCRIBE,
+    analysisEngines: {
+      openai: HAS_OPENAI_KEY,
+      localWhisper: LOCAL_WHISPER_TRANSCRIBE,
+    },
+    transcribeModel: HAS_OPENAI_KEY ? OPENAI_TRANSCRIBE_MODEL : (LOCAL_WHISPER_TRANSCRIBE ? LOCAL_WHISPER_MODEL : undefined),
+    adDetectionModel: HAS_OPENAI_KEY ? OPENAI_AD_DETECTION_MODEL : (LOCAL_WHISPER_TRANSCRIBE ? 'transcript-cues' : undefined),
     maxTranscriptionAudioMb: Math.round(MAX_AUDIO_BYTES / 1024 / 1024),
+    localWhisperMaxAudioMb: LOCAL_WHISPER_TRANSCRIBE ? Math.round(LOCAL_WHISPER_MAX_AUDIO_BYTES / 1024 / 1024) : undefined,
+    localWhisperMaxSeconds: LOCAL_WHISPER_TRANSCRIBE ? LOCAL_WHISPER_MAX_SECONDS : undefined,
   });
 });
 
@@ -445,7 +472,7 @@ app.post('/api/analyze', async (request, response) => {
   }
 
   const episode = parsed.data;
-  const takesAnalysisBudget = HAS_OPENAI_KEY;
+  const takesAnalysisBudget = HAS_ANALYSIS_ENGINE;
 
   if (takesAnalysisBudget) {
     if (!takeAnalyzeRateLimit(request, response)) {
@@ -659,6 +686,19 @@ async function safeFetchToFile(inputUrl: string, targetPath: string, byteLimit: 
   await pipeline(response.body, createByteLimitTransform(byteLimit, 'Audio file'), createWriteStream(targetPath));
 }
 
+async function safeFetchStartToFile(inputUrl: string, targetPath: string, byteLimit: number): Promise<void> {
+  const response = await fetchWithSafeRedirects(inputUrl, 'audio/*, application/octet-stream, */*', {
+    Range: `bytes=0-${byteLimit - 1}`,
+  });
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    response.body.resume();
+    throw new Error(`Audio download failed with ${response.statusCode}`);
+  }
+
+  await pipeline(response.body, createByteLimitTransform(byteLimit, 'Audio file'), createWriteStream(targetPath));
+}
+
 function createByteLimitTransform(byteLimit: number, label: string): Transform {
   let bytes = 0;
 
@@ -675,11 +715,11 @@ function createByteLimitTransform(byteLimit: number, label: string): Transform {
   });
 }
 
-async function fetchWithSafeRedirects(inputUrl: string, accept: string): Promise<SafeHttpResponse> {
+async function fetchWithSafeRedirects(inputUrl: string, accept: string, extraHeaders?: Record<string, string>): Promise<SafeHttpResponse> {
   let currentUrl = await validatePublicHttpUrl(inputUrl);
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await safeRequestOnce(currentUrl, accept);
+    const response = await safeRequestOnce(currentUrl, accept, extraHeaders);
 
     if (![301, 302, 303, 307, 308].includes(response.statusCode)) {
       return response;
@@ -697,7 +737,7 @@ async function fetchWithSafeRedirects(inputUrl: string, accept: string): Promise
   throw new Error(`Too many redirects; limit is ${MAX_REDIRECTS}`);
 }
 
-async function safeRequestOnce(inputUrl: string, accept: string): Promise<SafeHttpResponse> {
+async function safeRequestOnce(inputUrl: string, accept: string, extraHeaders?: Record<string, string>): Promise<SafeHttpResponse> {
   const url = new URL(inputUrl);
   const client = url.protocol === 'https:' ? https : http;
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
@@ -705,6 +745,7 @@ async function safeRequestOnce(inputUrl: string, accept: string): Promise<SafeHt
     headers: {
       Accept: accept,
       'User-Agent': 'SkipCastMVP/1.0 (+https://localhost)',
+      ...extraHeaders,
     },
     hostname,
     lookup(
@@ -927,36 +968,42 @@ async function normalizeEpisode(
 }
 
 async function analyzePodcastEpisode(episode: z.infer<typeof analyzeSchema>): Promise<AnalysisResult> {
-  if (!HAS_OPENAI_KEY) {
-    return unavailableAnalysis(episode, 'Analysis unavailable: set OPENAI_API_KEY for transcription-backed detection.');
-  }
-
-  if (episode.audioLength && episode.audioLength > MAX_AUDIO_BYTES) {
-    return unavailableAnalysis(episode, `Analysis unavailable: audio file is above ${Math.round(MAX_AUDIO_BYTES / 1024 / 1024)} MB.`);
+  const engine = chooseAnalysisEngine(episode);
+  if (!engine) {
+    return unavailableAnalysis(episode, analysisUnavailableReason(episode));
   }
 
   const safeAudioUrl = await validatePublicHttpUrl(episode.audioUrl);
   const tempDir = await mkdtemp(path.join(tmpdir(), 'skipcast-'));
   const extension = extensionFor(episode.audioType, episode.audioUrl);
   const tempPath = path.join(tempDir, `${randomUUID()}.${extension}`);
+  const downloadLimit = engine === 'openai' ? MAX_AUDIO_BYTES : LOCAL_WHISPER_MAX_AUDIO_BYTES;
 
   try {
-    await downloadAudio(safeAudioUrl, tempPath, MAX_AUDIO_BYTES);
-    const transcript = await transcribeWithOpenAI(tempPath);
-    const modelSegments = await detectAdsWithOpenAI(episode, transcript).catch((error) => {
-      console.warn('OpenAI ad model detection failed; falling back to transcript cues', error);
-      return [] as AdSegment[];
-    });
-    const fallbackSegments = detectAdsFromTranscript(episode.episodeId, transcript);
+    await downloadAudio(safeAudioUrl, tempPath, downloadLimit, engine === 'local-whisper');
+    const transcript = engine === 'openai'
+      ? await transcribeWithOpenAI(tempPath)
+      : await transcribeWithLocalWhisper(tempPath, tempDir);
+    const modelSegments = engine === 'openai'
+      ? await detectAdsWithOpenAI(episode, transcript).catch((error) => {
+          console.warn('OpenAI ad model detection failed; falling back to transcript cues', error);
+          return [] as AdSegment[];
+        })
+      : [];
+    const fallbackSegments = detectAdsFromTranscript(
+      episode.episodeId,
+      transcript,
+      engine === 'local-whisper' ? 'local-whisper-transcript' : 'openai-transcript',
+    );
     const segments = modelSegments.length ? modelSegments : fallbackSegments;
 
     return {
       episodeId: episode.episodeId,
-      engine: modelSegments.length ? 'openai-ad-model' : 'openai-transcript',
+      engine: modelSegments.length ? 'openai-ad-model' : `${engine}-transcript`,
       status: 'complete',
       message: segments.length
         ? `Found ${segments.length} likely ad ${segments.length === 1 ? 'segment' : 'segments'}`
-        : 'No high-confidence ad segments found',
+        : `No high-confidence ad segments found${engine === 'local-whisper' ? ' in the local scan window' : ''}`,
       segments,
     };
   } finally {
@@ -964,7 +1011,36 @@ async function analyzePodcastEpisode(episode: z.infer<typeof analyzeSchema>): Pr
   }
 }
 
-async function downloadAudio(audioUrl: string, targetPath: string, byteLimit: number): Promise<void> {
+function chooseAnalysisEngine(episode: z.infer<typeof analyzeSchema>): AnalysisEngine | undefined {
+  if (HAS_OPENAI_KEY && (!episode.audioLength || episode.audioLength <= MAX_AUDIO_BYTES)) {
+    return 'openai';
+  }
+
+  if (LOCAL_WHISPER_TRANSCRIBE) {
+    return 'local-whisper';
+  }
+
+  return undefined;
+}
+
+function analysisUnavailableReason(episode: z.infer<typeof analyzeSchema>): string {
+  if (!HAS_ANALYSIS_ENGINE) {
+    return 'Analysis unavailable: enable OPENAI_API_KEY or LOCAL_WHISPER_TRANSCRIBE for transcription-backed detection.';
+  }
+
+  if (HAS_OPENAI_KEY && episode.audioLength && episode.audioLength > MAX_AUDIO_BYTES) {
+    return `Analysis unavailable: OpenAI transcription uploads are capped at ${Math.round(MAX_AUDIO_BYTES / 1024 / 1024)} MB. Enable LOCAL_WHISPER_TRANSCRIBE for local scanning.`;
+  }
+
+  return 'Analysis unavailable for this episode.';
+}
+
+async function downloadAudio(audioUrl: string, targetPath: string, byteLimit: number, startOnly = false): Promise<void> {
+  if (startOnly) {
+    await safeFetchStartToFile(audioUrl, targetPath, byteLimit);
+    return;
+  }
+
   await safeFetchToFile(audioUrl, targetPath, byteLimit);
 }
 
@@ -991,6 +1067,114 @@ async function transcribeWithOpenAI(filePath: string): Promise<TranscriptSegment
       text: String(segment.text || ''),
     }))
     .filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
+}
+
+let localWhisperTranscriber: Promise<LocalWhisperTranscriber> | undefined;
+
+async function transcribeWithLocalWhisper(filePath: string, tempDir: string): Promise<TranscriptSegment[]> {
+  const wavPath = path.join(tempDir, 'local-whisper.wav');
+  await convertAudioForLocalWhisper(filePath, wavPath);
+
+  const [wavefile, transcriber] = await Promise.all([import('wavefile'), getLocalWhisperTranscriber()]);
+  const wavefileModule = wavefile as typeof wavefile & { 'module.exports'?: typeof wavefile.default };
+  const WaveFile = wavefile.default?.WaveFile || wavefile.WaveFile || wavefileModule['module.exports']?.WaveFile;
+  if (!WaveFile) {
+    throw new Error('Local Whisper could not load the WAV parser.');
+  }
+
+  const wav = new WaveFile(await readFile(wavPath));
+  wav.toBitDepth('32f');
+  wav.toSampleRate(16000);
+  const samples = wav.getSamples() as Float32Array | Float64Array | Float32Array[] | Float64Array[];
+  const channel = Array.isArray(samples) ? samples[0] : samples;
+  const audio = channel instanceof Float32Array ? channel : Float32Array.from(channel);
+
+  const output = await transcriber(audio, { return_timestamps: true });
+  return localWhisperChunksToSegments(output);
+}
+
+async function getLocalWhisperTranscriber(): Promise<LocalWhisperTranscriber> {
+  localWhisperTranscriber ??= (async () => {
+    const { pipeline } = await import('@huggingface/transformers');
+    return await pipeline('automatic-speech-recognition', LOCAL_WHISPER_MODEL) as LocalWhisperTranscriber;
+  })();
+
+  return localWhisperTranscriber;
+}
+
+async function convertAudioForLocalWhisper(inputPath: string, outputPath: string): Promise<void> {
+  const ffmpegModule = await import('ffmpeg-static');
+  const ffmpegPath = ffmpegModule.default;
+  if (!ffmpegPath) {
+    throw new Error('Local Whisper requires ffmpeg-static, but no ffmpeg binary was found.');
+  }
+
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-t',
+    String(LOCAL_WHISPER_MAX_SECONDS),
+    '-i',
+    inputPath,
+    '-ac',
+    '1',
+    '-ar',
+    '16000',
+    '-f',
+    'wav',
+    outputPath,
+  ];
+
+  await runProcess(ffmpegPath, args, 'ffmpeg audio conversion failed');
+}
+
+function localWhisperChunksToSegments(output: LocalWhisperOutput): TranscriptSegment[] {
+  const chunks = output.chunks || [];
+  const segments = chunks
+    .map((chunk) => {
+      const [start, end] = chunk.timestamp || [];
+      return {
+        start: Number(start),
+        end: Number(end),
+        text: String(chunk.text || '').trim(),
+      };
+    })
+    .filter((segment) => (
+      segment.text.length > 0
+      && Number.isFinite(segment.start)
+      && Number.isFinite(segment.end)
+      && segment.end > segment.start
+    ));
+
+  if (segments.length) {
+    return segments;
+  }
+
+  const text = output.text?.trim();
+  return text ? [{ start: 0, end: Math.min(LOCAL_WHISPER_MAX_SECONDS, 30), text }] : [];
+}
+
+async function runProcess(command: string, args: string[], errorPrefix: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true });
+    let stderr = '';
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-4000);
+    });
+
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`${errorPrefix}: ${stderr.trim() || `exit code ${code}`}`));
+    });
+  });
 }
 
 async function detectAdsWithOpenAI(episode: z.infer<typeof analyzeSchema>, transcript: TranscriptSegment[]): Promise<AdSegment[]> {
@@ -1117,7 +1301,11 @@ function toModelAdSegment(episodeId: string, index: number, candidate: AiAdCandi
   };
 }
 
-function detectAdsFromTranscript(episodeId: string, transcript: TranscriptSegment[]): AdSegment[] {
+function detectAdsFromTranscript(
+  episodeId: string,
+  transcript: TranscriptSegment[],
+  source: 'openai-transcript' | 'local-whisper-transcript' = 'openai-transcript',
+): AdSegment[] {
   const segments: AdSegment[] = [];
   let active: { start: number; end: number; hits: number; category: SegmentCategory } | null = null;
   let quietCount = 0;
@@ -1150,7 +1338,7 @@ function detectAdsFromTranscript(episodeId: string, transcript: TranscriptSegmen
 
     if (shouldClose) {
       if (elapsed >= 12) {
-        segments.push(toAdSegment(episodeId, segments.length, active));
+        segments.push(toAdSegment(episodeId, segments.length, active, source));
       }
       active = null;
       quietCount = 0;
@@ -1158,7 +1346,7 @@ function detectAdsFromTranscript(episodeId: string, transcript: TranscriptSegmen
   }
 
   if (active && active.end - active.start >= 12) {
-    segments.push(toAdSegment(episodeId, segments.length, active));
+    segments.push(toAdSegment(episodeId, segments.length, active, source));
   }
 
   return mergeCloseSegments(segments);
@@ -1206,18 +1394,19 @@ function toAdSegment(
   episodeId: string,
   index: number,
   active: { start: number; end: number; hits: number; category: SegmentCategory },
+  source: 'openai-transcript' | 'local-whisper-transcript' = 'openai-transcript',
 ): AdSegment {
   const duration = Math.max(1, active.end - active.start);
   const confidence = Math.min(0.95, 0.58 + active.hits * 0.08 + Math.min(duration, 120) / 1000);
 
   return {
-    id: stableId(`${episodeId}:openai:${index}:${active.start}:${active.end}`),
+    id: stableId(`${episodeId}:${source}:${index}:${active.start}:${active.end}`),
     start: Number(active.start.toFixed(2)),
     end: Number(active.end.toFixed(2)),
     category: active.category,
     confidence,
     label: labelFor(active.category),
-    source: 'openai-transcript',
+    source,
     reason: 'Matched sponsor/ad-break transcript cues.',
   };
 }

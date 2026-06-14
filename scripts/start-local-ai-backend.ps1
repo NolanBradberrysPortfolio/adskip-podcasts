@@ -16,7 +16,19 @@ New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 Remove-Item -LiteralPath $serverLog, $tunnelLog -Force -ErrorAction SilentlyContinue
 
 if (-not $env:OPENAI_API_KEY) {
-  throw "Set OPENAI_API_KEY in this PowerShell session first. Example: `$env:OPENAI_API_KEY='sk-...'"
+  Write-Host "OPENAI_API_KEY is not set. Starting local Whisper transcription instead."
+  if (-not $env:LOCAL_WHISPER_TRANSCRIBE) {
+    $env:LOCAL_WHISPER_TRANSCRIBE = "true"
+  }
+  if (-not $env:LOCAL_WHISPER_MODEL) {
+    $env:LOCAL_WHISPER_MODEL = "Xenova/whisper-tiny.en"
+  }
+  if (-not $env:LOCAL_WHISPER_MAX_AUDIO_MB) {
+    $env:LOCAL_WHISPER_MAX_AUDIO_MB = "120"
+  }
+  if (-not $env:LOCAL_WHISPER_MAX_SECONDS) {
+    $env:LOCAL_WHISPER_MAX_SECONDS = "1200"
+  }
 }
 
 $cloudflared = Join-Path $root "tools\cloudflared.exe"
@@ -91,7 +103,7 @@ Write-Host "Tunnel URL: $apiUrl"
 for ($attempt = 0; $attempt -lt 15; $attempt += 1) {
   try {
     $health = Invoke-RestMethod -Uri "$apiUrl/api/health" -TimeoutSec 15
-    Write-Host "Health: ok=$($health.ok) openai=$($health.openai) adModel=$($health.adDetectionModel)"
+    Write-Host "Health: ok=$($health.ok) openai=$($health.openai) localWhisper=$($health.localWhisper) adModel=$($health.adDetectionModel)"
     break
   } catch {
     Start-Sleep -Seconds 2

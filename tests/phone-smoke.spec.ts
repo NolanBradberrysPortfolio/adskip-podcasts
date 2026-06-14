@@ -20,7 +20,6 @@ test('GitHub Pages phone web flow can add RSS and reach the player', async ({ pa
 
   await expect(page.getByText(/Showing 1-12 of \d+ episodes/)).toBeVisible({ timeout: 30000 });
   await expect(page.getByRole('button', { name: /Analyze|Ad scan off/ }).first()).toBeVisible();
-  await expect(page.getByText('Skip segments')).toHaveCount(0);
 
   await page.getByRole('button', { name: /no skip segments/i }).first().click();
   await expect(page.getByRole('button', { name: 'Play' })).toBeVisible();

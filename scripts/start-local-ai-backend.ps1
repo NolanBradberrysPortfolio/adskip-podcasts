@@ -44,7 +44,12 @@ $env:PORT = "$Port"
 $env:CORS_ORIGINS = $origin
 if (-not $env:ANALYZE_API_TOKEN) {
   $tokenBytes = New-Object byte[] 24
-  [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $rng.GetBytes($tokenBytes)
+  } finally {
+    $rng.Dispose()
+  }
   $env:ANALYZE_API_TOKEN = [Convert]::ToBase64String($tokenBytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
 }
 if (-not $env:OPENAI_TRANSCRIBE_MODEL) {

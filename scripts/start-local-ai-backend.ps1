@@ -31,9 +31,9 @@ if (-not $env:OPENAI_API_KEY) {
   }
 }
 
-$cloudflared = Join-Path $root "tools\cloudflared.exe"
+$cloudflared = Join-Path $root "tools\cloudflared-386.exe"
 if (-not (Test-Path $cloudflared)) {
-  $cloudflared = Join-Path $root "tools\cloudflared-386.exe"
+  $cloudflared = Join-Path $root "tools\cloudflared.exe"
 }
 
 if (-not (Test-Path $cloudflared)) {

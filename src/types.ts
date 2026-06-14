@@ -7,7 +7,7 @@ export type AdSegment = {
   category: SegmentCategory;
   confidence: number;
   label: string;
-  source: 'openai-ad-model' | 'openai-transcript' | 'local-whisper-transcript' | 'demo-rule-engine' | 'manual';
+  source: 'openai-ad-model' | 'codex-ad-model' | 'openai-transcript' | 'local-whisper-transcript' | 'demo-rule-engine' | 'manual';
   reason?: string;
 };
 
@@ -57,7 +57,7 @@ export type ImportFeedCandidate = {
 
 export type AnalysisResult = {
   episodeId: string;
-  engine: 'openai-ad-model' | 'openai-transcript' | 'local-whisper-transcript' | 'unavailable';
+  engine: 'openai-ad-model' | 'codex-ad-model' | 'openai-transcript' | 'local-whisper-transcript' | 'unavailable';
   status: 'complete' | 'fallback' | 'unavailable';
   message: string;
   segments: AdSegment[];

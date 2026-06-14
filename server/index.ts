@@ -6,7 +6,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { LookupOptions } from 'node:dns';
 import dns from 'node:dns/promises';
 import type { IncomingHttpHeaders, IncomingMessage, RequestOptions } from 'node:http';
@@ -26,7 +26,7 @@ const MAX_AUDIO_BYTES = readPositiveInteger('MAX_TRANSCRIPTION_AUDIO_MB', 24) * 
 const MAX_FEED_BYTES = readPositiveInteger('MAX_FEED_XML_MB', 3) * 1024 * 1024;
 const MAX_EPISODES_PER_FEED = readPositiveInteger('MAX_EPISODES_PER_FEED', 150);
 const FETCH_TIMEOUT_MS = readPositiveInteger('FETCH_TIMEOUT_MS', 15000);
-const MAX_REDIRECTS = readPositiveInteger('MAX_REDIRECTS', 8);
+const MAX_REDIRECTS = readPositiveInteger('MAX_REDIRECTS', 12);
 const RATE_LIMIT_WINDOW_MS = readPositiveInteger('RATE_LIMIT_WINDOW_MS', 60_000);
 const RATE_LIMIT_MAX_REQUESTS = readPositiveInteger('RATE_LIMIT_MAX_REQUESTS', 80);
 const ANALYZE_RATE_LIMIT_WINDOW_MS = readPositiveInteger('ANALYZE_RATE_LIMIT_WINDOW_MS', 60 * 60_000);
@@ -47,6 +47,11 @@ const LOCAL_WHISPER_TRANSCRIBE = process.env.LOCAL_WHISPER_TRANSCRIBE === 'true'
 const LOCAL_WHISPER_MODEL = process.env.LOCAL_WHISPER_MODEL || 'Xenova/whisper-tiny.en';
 const LOCAL_WHISPER_MAX_AUDIO_BYTES = readPositiveInteger('LOCAL_WHISPER_MAX_AUDIO_MB', 96) * 1024 * 1024;
 const LOCAL_WHISPER_MAX_SECONDS = readPositiveInteger('LOCAL_WHISPER_MAX_SECONDS', 20 * 60);
+const LOCAL_WHISPER_TIMEOUT_MS = readPositiveInteger('LOCAL_WHISPER_TIMEOUT_MS', 85_000);
+const FFMPEG_TIMEOUT_MS = readPositiveInteger('FFMPEG_TIMEOUT_MS', 30_000);
+const LOCAL_CODEX_AD_DETECTION = process.env.LOCAL_CODEX_AD_DETECTION === 'true';
+const CODEX_CLI = process.env.CODEX_CLI || 'codex';
+const CODEX_AD_DETECTION_TIMEOUT_MS = readPositiveInteger('CODEX_AD_DETECTION_TIMEOUT_MS', 45_000);
 const AD_DETECTION_WINDOW_SECONDS = readPositiveInteger('AD_DETECTION_WINDOW_SECONDS', 12 * 60);
 const AD_DETECTION_MAX_WINDOWS = readPositiveInteger('AD_DETECTION_MAX_WINDOWS', 8);
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID?.trim();
@@ -178,8 +183,6 @@ type LocalWhisperOutput = {
   chunks?: LocalWhisperChunk[];
 };
 
-type LocalWhisperTranscriber = (audio: Float32Array, options: { return_timestamps: true }) => Promise<LocalWhisperOutput>;
-
 const AD_SEGMENT_CATEGORIES = ['host_read_ad', 'dynamic_ad', 'network_promo', 'self_promo', 'intro', 'outro'] as const satisfies readonly SegmentCategory[];
 
 const aiAdCandidateSchema = z.object({
@@ -284,10 +287,12 @@ app.get('/api/health', (_request, response) => {
       localWhisper: LOCAL_WHISPER_TRANSCRIBE,
     },
     transcribeModel: HAS_OPENAI_KEY ? OPENAI_TRANSCRIBE_MODEL : (LOCAL_WHISPER_TRANSCRIBE ? LOCAL_WHISPER_MODEL : undefined),
-    adDetectionModel: HAS_OPENAI_KEY ? OPENAI_AD_DETECTION_MODEL : (LOCAL_WHISPER_TRANSCRIBE ? 'transcript-cues' : undefined),
+    adDetectionModel: HAS_OPENAI_KEY ? OPENAI_AD_DETECTION_MODEL : (LOCAL_CODEX_AD_DETECTION ? 'codex-cli' : (LOCAL_WHISPER_TRANSCRIBE ? 'transcript-cues' : undefined)),
     maxTranscriptionAudioMb: Math.round(MAX_AUDIO_BYTES / 1024 / 1024),
     localWhisperMaxAudioMb: LOCAL_WHISPER_TRANSCRIBE ? Math.round(LOCAL_WHISPER_MAX_AUDIO_BYTES / 1024 / 1024) : undefined,
     localWhisperMaxSeconds: LOCAL_WHISPER_TRANSCRIBE ? LOCAL_WHISPER_MAX_SECONDS : undefined,
+    localWhisperTimeoutMs: LOCAL_WHISPER_TRANSCRIBE ? LOCAL_WHISPER_TIMEOUT_MS : undefined,
+    localCodexAdDetection: LOCAL_WHISPER_TRANSCRIBE ? LOCAL_CODEX_AD_DETECTION : undefined,
   });
 });
 
@@ -696,6 +701,16 @@ async function safeFetchStartToFile(inputUrl: string, targetPath: string, byteLi
     throw new Error(`Audio download failed with ${response.statusCode}`);
   }
 
+  if (response.statusCode !== 206) {
+    response.body.resume();
+    throw new Error('Audio host does not support partial downloads required for local scanning.');
+  }
+
+  if (!headerValue(response.headers['content-range'])) {
+    response.body.resume();
+    throw new Error('Audio host did not return a Content-Range header for local scanning.');
+  }
+
   await pipeline(response.body, createByteLimitTransform(byteLimit, 'Audio file'), createWriteStream(targetPath));
 }
 
@@ -989,7 +1004,12 @@ async function analyzePodcastEpisode(episode: z.infer<typeof analyzeSchema>): Pr
           console.warn('OpenAI ad model detection failed; falling back to transcript cues', error);
           return [] as AdSegment[];
         })
-      : [];
+      : LOCAL_CODEX_AD_DETECTION
+        ? await detectAdsWithCodex(episode, transcript).catch((error) => {
+            console.warn('Codex ad model detection failed; falling back to transcript cues', error);
+            return [] as AdSegment[];
+          })
+        : [];
     const fallbackSegments = detectAdsFromTranscript(
       episode.episodeId,
       transcript,
@@ -999,7 +1019,7 @@ async function analyzePodcastEpisode(episode: z.infer<typeof analyzeSchema>): Pr
 
     return {
       episodeId: episode.episodeId,
-      engine: modelSegments.length ? 'openai-ad-model' : `${engine}-transcript`,
+      engine: modelSegments.length ? (engine === 'openai' ? 'openai-ad-model' : 'codex-ad-model') : `${engine}-transcript`,
       status: 'complete',
       message: segments.length
         ? `Found ${segments.length} likely ad ${segments.length === 1 ? 'segment' : 'segments'}`
@@ -1069,37 +1089,23 @@ async function transcribeWithOpenAI(filePath: string): Promise<TranscriptSegment
     .filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
 }
 
-let localWhisperTranscriber: Promise<LocalWhisperTranscriber> | undefined;
-
 async function transcribeWithLocalWhisper(filePath: string, tempDir: string): Promise<TranscriptSegment[]> {
   const wavPath = path.join(tempDir, 'local-whisper.wav');
   await convertAudioForLocalWhisper(filePath, wavPath);
-
-  const [wavefile, transcriber] = await Promise.all([import('wavefile'), getLocalWhisperTranscriber()]);
-  const wavefileModule = wavefile as typeof wavefile & { 'module.exports'?: typeof wavefile.default };
-  const WaveFile = wavefile.default?.WaveFile || wavefile.WaveFile || wavefileModule['module.exports']?.WaveFile;
-  if (!WaveFile) {
-    throw new Error('Local Whisper could not load the WAV parser.');
-  }
-
-  const wav = new WaveFile(await readFile(wavPath));
-  wav.toBitDepth('32f');
-  wav.toSampleRate(16000);
-  const samples = wav.getSamples() as Float32Array | Float64Array | Float32Array[] | Float64Array[];
-  const channel = Array.isArray(samples) ? samples[0] : samples;
-  const audio = channel instanceof Float32Array ? channel : Float32Array.from(channel);
-
-  const output = await transcriber(audio, { return_timestamps: true });
+  const output = await runLocalWhisperWorker(wavPath);
   return localWhisperChunksToSegments(output);
 }
 
-async function getLocalWhisperTranscriber(): Promise<LocalWhisperTranscriber> {
-  localWhisperTranscriber ??= (async () => {
-    const { pipeline } = await import('@huggingface/transformers');
-    return await pipeline('automatic-speech-recognition', LOCAL_WHISPER_MODEL) as LocalWhisperTranscriber;
-  })();
+async function runLocalWhisperWorker(wavPath: string): Promise<LocalWhisperOutput> {
+  const workerPath = path.join(process.cwd(), 'server', 'local-whisper-worker.mjs');
+  const { stdout } = await runProcessCapture(
+    process.execPath,
+    [workerPath, wavPath, LOCAL_WHISPER_MODEL],
+    'Local Whisper transcription failed',
+    LOCAL_WHISPER_TIMEOUT_MS,
+  );
 
-  return localWhisperTranscriber;
+  return JSON.parse(stdout) as LocalWhisperOutput;
 }
 
 async function convertAudioForLocalWhisper(inputPath: string, outputPath: string): Promise<void> {
@@ -1127,7 +1133,7 @@ async function convertAudioForLocalWhisper(inputPath: string, outputPath: string
     outputPath,
   ];
 
-  await runProcess(ffmpegPath, args, 'ffmpeg audio conversion failed');
+  await runProcess(ffmpegPath, args, 'ffmpeg audio conversion failed', FFMPEG_TIMEOUT_MS);
 }
 
 function localWhisperChunksToSegments(output: LocalWhisperOutput): TranscriptSegment[] {
@@ -1156,19 +1162,66 @@ function localWhisperChunksToSegments(output: LocalWhisperOutput): TranscriptSeg
   return text ? [{ start: 0, end: Math.min(LOCAL_WHISPER_MAX_SECONDS, 30), text }] : [];
 }
 
-async function runProcess(command: string, args: string[], errorPrefix: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
+async function runProcess(command: string, args: string[], errorPrefix: string, timeoutMs: number): Promise<void> {
+  await runProcessCapture(command, args, errorPrefix, timeoutMs);
+}
+
+async function runProcessCapture(
+  command: string,
+  args: string[],
+  errorPrefix: string,
+  timeoutMs: number,
+  stdin?: string,
+): Promise<{ stdout: string; stderr: string }> {
+  return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(command, args, {
+      shell: process.platform === 'win32' && !path.isAbsolute(command),
+      windowsHide: true,
+    });
+    let stdout = '';
     let stderr = '';
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      child.kill('SIGKILL');
+      reject(new Error(`${errorPrefix}: timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout = `${stdout}${chunk.toString()}`.slice(-1_000_000);
+    });
 
     child.stderr.on('data', (chunk: Buffer) => {
       stderr = `${stderr}${chunk.toString()}`.slice(-4000);
     });
 
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+
+    if (stdin !== undefined) {
+      child.stdin.end(stdin);
+    }
+
     child.on('close', (code) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
       if (code === 0) {
-        resolve();
+        resolve({ stdout, stderr });
         return;
       }
 
@@ -1199,6 +1252,27 @@ async function detectAdsWithOpenAI(episode: z.infer<typeof analyzeSchema>, trans
   );
 }
 
+async function detectAdsWithCodex(episode: z.infer<typeof analyzeSchema>, transcript: TranscriptSegment[]): Promise<AdSegment[]> {
+  if (!transcript.length) {
+    return [];
+  }
+
+  const windows = transcriptWindows(transcript, AD_DETECTION_WINDOW_SECONDS).slice(0, AD_DETECTION_MAX_WINDOWS);
+  const candidates: AiAdCandidate[] = [];
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const windowSegments = windows[index];
+    const windowCandidates = await classifyAdWindowWithCodex(episode, windowSegments, index + 1, windows.length);
+    candidates.push(...windowCandidates);
+  }
+
+  return mergeCloseSegments(
+    candidates
+      .map((candidate, index) => toModelAdSegment(episode.episodeId, index, candidate, 'codex-ad-model'))
+      .filter((segment): segment is AdSegment => Boolean(segment)),
+  );
+}
+
 function transcriptWindows(transcript: TranscriptSegment[], windowSeconds: number): TranscriptSegment[][] {
   const windows: TranscriptSegment[][] = [];
   let current: TranscriptSegment[] = [];
@@ -1219,6 +1293,72 @@ function transcriptWindows(transcript: TranscriptSegment[], windowSeconds: numbe
   }
 
   return windows;
+}
+
+async function classifyAdWindowWithCodex(
+  episode: z.infer<typeof analyzeSchema>,
+  transcript: TranscriptSegment[],
+  windowIndex: number,
+  windowCount: number,
+): Promise<AiAdCandidate[]> {
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'skipcast-codex-'));
+  const outputPath = path.join(tempDir, 'segments.json');
+  const transcriptText = transcript
+    .map((segment) => `[${segment.start.toFixed(1)}-${segment.end.toFixed(1)}] ${segment.text.trim()}`)
+    .join('\n')
+    .slice(0, 60_000);
+  const prompt = [
+    'You detect podcast advertising timestamp ranges from timestamped transcripts.',
+    'Return only JSON with a "segments" array. Do not include markdown or prose.',
+    'Each segment must include start, end, category, confidence, and reason.',
+    'Use only timestamps present in the transcript. Do not invent ranges.',
+    'Include sponsor reads, inserted ad breaks, promo codes, commercial breaks, network promos, and paid self-promotion.',
+    'Exclude normal editorial discussion, jokes, news, and guest conversation unless it is clearly advertising.',
+    'If uncertain, omit the segment.',
+    '',
+    `Podcast: ${episode.podcastTitle}`,
+    `Episode: ${episode.title}`,
+    `Window: ${windowIndex} of ${windowCount}`,
+    '',
+    'Allowed categories: host_read_ad, dynamic_ad, network_promo, self_promo.',
+    'JSON schema example:',
+    '{"segments":[{"start":12.3,"end":74.8,"category":"host_read_ad","confidence":0.83,"reason":"Sponsor read with promo code"}]}',
+    '',
+    transcriptText,
+  ].join('\n');
+
+  try {
+    await writeFile(path.join(tempDir, 'prompt.txt'), prompt, 'utf8');
+    await runProcessCapture(
+      CODEX_CLI,
+      [
+        '-a',
+        'never',
+        'exec',
+        '--skip-git-repo-check',
+        '--sandbox',
+        'read-only',
+        '--ephemeral',
+        '--cd',
+        tempDir,
+        '-o',
+        outputPath,
+        '-',
+      ],
+      'Codex ad model detection failed',
+      CODEX_AD_DETECTION_TIMEOUT_MS,
+      prompt,
+    );
+
+    const content = await readFile(outputPath, 'utf8');
+    const parsed = aiAdDetectionSchema.safeParse(JSON.parse(content));
+    return parsed.success ? parsed.data.segments : [];
+  } catch (error) {
+    console.warn('Codex ad window classification failed', error);
+    return [];
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 async function classifyAdWindow(
@@ -1277,7 +1417,12 @@ async function classifyAdWindow(
   }
 }
 
-function toModelAdSegment(episodeId: string, index: number, candidate: AiAdCandidate): AdSegment | undefined {
+function toModelAdSegment(
+  episodeId: string,
+  index: number,
+  candidate: AiAdCandidate,
+  source: 'openai-ad-model' | 'codex-ad-model' = 'openai-ad-model',
+): AdSegment | undefined {
   const start = Math.max(0, candidate.start - 0.5);
   const end = Math.max(start, candidate.end + 0.5);
   const duration = end - start;
@@ -1290,14 +1435,14 @@ function toModelAdSegment(episodeId: string, index: number, candidate: AiAdCandi
   const category = candidate.category === 'intro' || candidate.category === 'outro' ? 'self_promo' : candidate.category;
 
   return {
-    id: stableId(`${episodeId}:ad-model:${index}:${start}:${end}`),
+    id: stableId(`${episodeId}:${source}:${index}:${start}:${end}`),
     start: Number(start.toFixed(2)),
     end: Number(end.toFixed(2)),
     category,
     confidence,
     label: labelFor(category),
-    source: 'openai-ad-model',
-    reason: candidate.reason || `Detected by ${OPENAI_AD_DETECTION_MODEL}.`,
+    source,
+    reason: candidate.reason || `Detected by ${source === 'openai-ad-model' ? OPENAI_AD_DETECTION_MODEL : 'Codex CLI'}.`,
   };
 }
 

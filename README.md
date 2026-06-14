@@ -60,6 +60,8 @@ GitHub Pages is static, so RSS and ad-scan features need the local API exposed t
 
 If `OPENAI_API_KEY` is set, the launcher uses the faster OpenAI transcription and ad-classification path. If no key is set, it enables local Whisper transcription through Transformers.js and uses transcript cues to find likely ad reads in the opening scan window. The first local run downloads the Whisper model and local scans are CPU-heavy; the launcher keeps the no-key phone demo to a short opening scan so the Cloudflare tunnel does not time out.
 
+The launcher also creates a per-run analyze token, starts the API with `ALLOW_UNAUTHENTICATED_ANALYZE=false`, and passes that token into the Pages build. This is still only demo friction because public web bundles can be inspected, but it prevents anonymous direct calls to `/api/analyze` without the token.
+
 The launcher starts `npm run server:start`, starts Cloudflare Tunnel, waits for the `https://...trycloudflare.com` URL, and triggers the GitHub Pages workflow with that API URL. For this local demo it allows unauthenticated analysis but limits analysis to a small number of requests per hour; stop it when you are done:
 
 ```powershell
@@ -90,7 +92,7 @@ $env:LOCAL_WHISPER_MAX_SECONDS="1200"
 npm run server:start
 ```
 
-Local Whisper scans only the first `LOCAL_WHISPER_MAX_SECONDS` of an episode, defaults to the small `Xenova/whisper-tiny.en` model, and uses transcript cue rules for likely sponsor segments. It is useful for a private local demo, not a production-scale analyzer.
+Local Whisper scans only the first `LOCAL_WHISPER_MAX_SECONDS` of an episode, defaults to the small `Xenova/whisper-tiny.en` model, and uses transcript cue rules for likely sponsor segments. It is useful for a private local demo, not a production-scale analyzer. Set `LOCAL_CODEX_AD_DETECTION=true` to ask the signed-in Codex CLI to classify transcript windows after local Whisper; this uses the local Codex login but may be too slow for a Cloudflare quick tunnel.
 
 If no analysis engine is enabled or the episode audio is too large, the API returns `unavailable` with no skip segments. The app does not auto-skip fake timestamps.
 
@@ -107,7 +109,7 @@ npm run server:start
 
 For GitHub Pages builds that should call a token-protected analyzer, also set `EXPO_PUBLIC_ANALYZE_API_TOKEN` in the Pages build environment to the same token. Do not commit real keys or tokens.
 
-OpenClaw/Codex OAuth can use a signed-in ChatGPT/Codex subscription for chat/model turns, and Codex CLI can classify text. On this install, OpenClaw's batch audio transcription path still routes through the regular OpenAI audio transcription provider, not the Codex chat route. That is why SkipCast uses either a Platform API key for OpenAI transcription or the local Whisper path above for no-key transcription.
+OpenClaw/Codex OAuth can use a signed-in ChatGPT/Codex subscription for chat/model turns, and Codex CLI can classify text. On this install, OpenClaw's batch audio transcription path still routes through the regular OpenAI audio transcription provider, not the Codex chat route. That is why SkipCast uses either a Platform API key for OpenAI transcription or the local Whisper path above for no-key transcription, with optional Codex CLI text classification after a transcript exists.
 
 The app stores timestamp metadata and seeks over ranges during foreground playback. It does not redistribute edited copies of podcast audio.
 

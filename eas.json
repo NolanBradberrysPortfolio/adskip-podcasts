@@ -8,19 +8,19 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://resource-rip-avi-accessed.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://hon-hour-status-guests.trycloudflare.com"
       }
     },
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://resource-rip-avi-accessed.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://hon-hour-status-guests.trycloudflare.com"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://resource-rip-avi-accessed.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://hon-hour-status-guests.trycloudflare.com"
       }
     }
   },

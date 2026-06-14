@@ -42,13 +42,18 @@ if (-not (Test-Path $cloudflared)) {
 
 $env:PORT = "$Port"
 $env:CORS_ORIGINS = $origin
+if (-not $env:ANALYZE_API_TOKEN) {
+  $tokenBytes = New-Object byte[] 24
+  [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+  $env:ANALYZE_API_TOKEN = [Convert]::ToBase64String($tokenBytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+}
 if (-not $env:OPENAI_TRANSCRIBE_MODEL) {
   $env:OPENAI_TRANSCRIBE_MODEL = "whisper-1"
 }
 if (-not $env:OPENAI_AD_DETECTION_MODEL) {
   $env:OPENAI_AD_DETECTION_MODEL = "gpt-4o-mini"
 }
-$env:ALLOW_UNAUTHENTICATED_ANALYZE = "true"
+$env:ALLOW_UNAUTHENTICATED_ANALYZE = "false"
 if (-not $env:ANALYZE_RATE_LIMIT_MAX_REQUESTS) {
   $env:ANALYZE_RATE_LIMIT_MAX_REQUESTS = "3"
 }
@@ -108,10 +113,10 @@ for ($attempt = 0; $attempt -lt 15; $attempt += 1) {
 
 if ($NoDeploy) {
   Write-Host "Skipped GitHub Pages redeploy. To deploy manually:"
-  Write-Host "gh workflow run pages.yml --repo $Repo --ref main --field api_url=`"$apiUrl`""
+  Write-Host "gh workflow run pages.yml --repo $Repo --ref main --field api_url=`"$apiUrl`" --field analyze_token=`"$env:ANALYZE_API_TOKEN`""
 } else {
   Write-Host "Redeploying GitHub Pages to point at $apiUrl ..."
-  gh workflow run pages.yml --repo $Repo --ref main --field api_url="$apiUrl"
+  gh workflow run pages.yml --repo $Repo --ref main --field api_url="$apiUrl" --field analyze_token="$env:ANALYZE_API_TOKEN"
   Write-Host "Deploy started. Keep this computer awake while testing from your phone."
 }
 

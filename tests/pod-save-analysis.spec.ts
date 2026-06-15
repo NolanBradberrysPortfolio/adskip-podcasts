@@ -34,14 +34,14 @@ test('Pod Save America public transcripts return expected ad breaks', async () =
   const sedaris = findEpisode(feed.episodes, 'David Sedaris is Mostly Bark, Some Bite');
 
   await expectAnalysisRanges(cageMatch, [
-    [0, 90.5],
-    [1106, 1264.7],
-    [2482, 2626.7],
+    [0, 74],
+    [1106, 1262.5],
+    [2482, 2623.5],
     [4065, 4100.9],
   ]);
   await expectAnalysisRanges(sedaris, [
-    [950, 1120],
-    [2089.5, 2189.2],
+    [950, 1116.8],
+    [2089.5, 2188.2],
     [2920.4, 3022.5],
   ]);
 });

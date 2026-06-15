@@ -52,6 +52,12 @@ test('Pod Save America skip controls still jump over later ads and page remains 
     .toBeGreaterThan(1264.68);
   expect(await playbackPosition(page)).toBeLessThan(1305);
 
+  await page.getByRole('button', { name: 'Back 15 seconds' }).click();
+  await expect
+    .poll(async () => playbackPosition(page), { timeout: 30000 })
+    .toBeLessThan(1106);
+  expect(await playbackPosition(page)).toBeGreaterThan(1095);
+
   await page.getByRole('button', { name: 'Play' }).click();
   await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible({ timeout: 15000 });
 

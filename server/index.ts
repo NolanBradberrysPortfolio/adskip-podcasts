@@ -1850,7 +1850,9 @@ function detectAdsFromPublicTranscript(episodeId: string, transcript: Transcript
     const elapsed = line.end - active.start;
 
     if (returnCue && elapsed >= 18) {
-      active.end = score > 0 || callToAction || hasSponsorCopyBeforeReturnCue(text) ? line.end : line.start;
+      active.end = score > 0 || callToAction || hasSponsorCopyBeforeReturnCue(text)
+        ? mixedCueBoundary(text, line.start, line.end, PUBLIC_TRANSCRIPT_RETURN_CUE_PATTERN)
+        : line.start;
       if (active.end - active.start >= 12) {
         segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
       }
@@ -1870,7 +1872,7 @@ function detectAdsFromPublicTranscript(episodeId: string, transcript: Transcript
     }
 
     if (active.sawCallToAction && !startCue && isSponsorEditorialBridge(text)) {
-      active.end = line.end;
+      active.end = mixedCueBoundary(text, line.start, line.end, SPONSOR_EDITORIAL_BRIDGE_PATTERN);
       if (active.end - active.start >= 12) {
         segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
       }
@@ -1914,14 +1916,27 @@ function isAdCallToActionCue(text: string): boolean {
   return /promo code|use code|enter (?:promo )?code|dot com|\.com|slash|free shipping|free trial|first month|first week|first order|off your first|checkout|sign up|listeners|no safe like/i.test(text);
 }
 
+const PUBLIC_TRANSCRIPT_RETURN_CUE_PATTERN = /welcome to pod save america|back to (?:the )?(?:show|episode|conversation)|and we'?re back|now back to|let'?s get back/i;
+const SPONSOR_EDITORIAL_BRIDGE_PATTERN = /\bcheckout\s+(?:on|and|that|the|in terms)\b|dot com slash .{0,35}\bwell\b|it's clearly\b/i;
+
 function isPublicTranscriptReturnCue(text: string): boolean {
-  return /welcome to pod save america|back to (?:the )?(?:show|episode|conversation)|and we'?re back|now back to|let'?s get back/i.test(text);
+  return PUBLIC_TRANSCRIPT_RETURN_CUE_PATTERN.test(text);
 }
 
 function hasSponsorCopyBeforeReturnCue(text: string): boolean {
-  const match = text.match(/welcome to pod save america|back to (?:the )?(?:show|episode|conversation)|and we'?re back|now back to|let'?s get back/i);
+  const match = text.match(PUBLIC_TRANSCRIPT_RETURN_CUE_PATTERN);
   const beforeReturnCue = match?.index === undefined ? '' : text.slice(0, match.index).trim();
   return beforeReturnCue.length >= 6;
+}
+
+function mixedCueBoundary(text: string, start: number, end: number, cuePattern: RegExp): number {
+  const match = text.match(cuePattern);
+  if (match?.index === undefined || !text.trim()) {
+    return end;
+  }
+
+  const cueRatio = Math.max(0, Math.min(1, match.index / text.length));
+  return Number((start + (end - start) * cueRatio).toFixed(2));
 }
 
 function isLikelyEditorialResume(text: string): boolean {
@@ -1931,7 +1946,7 @@ function isLikelyEditorialResume(text: string): boolean {
 }
 
 function isSponsorEditorialBridge(text: string): boolean {
-  return /\bcheckout\s+(?:on|and|that|the|in terms)\b|dot com slash .{0,35}\bwell\b/i.test(text);
+  return SPONSOR_EDITORIAL_BRIDGE_PATTERN.test(text);
 }
 
 function detectAdsFromTranscript(

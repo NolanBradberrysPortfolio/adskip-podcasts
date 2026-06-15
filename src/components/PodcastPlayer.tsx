@@ -28,6 +28,7 @@ type Props = {
 };
 
 const speedOptions = [1, 1.25, 1.5, 2];
+const REWIND_SKIP_MARGIN_SECONDS = 5;
 const webSliderStyle: CSSProperties = {
   appearance: 'none',
   background: 'transparent',
@@ -139,6 +140,11 @@ export function PodcastPlayer({
     player.seekTo(target).catch(() => undefined);
   };
 
+  const seekBeforeSegment = (segment: AdSegment) => {
+    lastSkipped.current = segment;
+    player.seekTo(Math.max(segment.start - REWIND_SKIP_MARGIN_SECONDS, 0)).catch(() => undefined);
+  };
+
   useEffect(() => {
     const suppressed = suppressedSegmentId.current;
     if (!suppressed) {
@@ -167,12 +173,17 @@ export function PodcastPlayer({
     }
   }, [effectiveAutoSkip, episode, player, segments, status.currentTime, status.playing]);
 
-  const seekTo = (value: number) => {
+  const seekTo = (value: number, direction: 'auto' | 'forward' | 'backward' = 'auto') => {
     const nextValue = clamp(value, 0, timelineMaximum);
     const segment = effectiveAutoSkip ? findSkippableSegment(nextValue) : undefined;
 
     if (segment) {
-      seekPastSegment(segment);
+      const resolvedDirection = direction === 'auto' && nextValue < (status.currentTime || 0) ? 'backward' : direction;
+      if (resolvedDirection === 'backward') {
+        seekBeforeSegment(segment);
+      } else {
+        seekPastSegment(segment);
+      }
       return;
     }
 
@@ -238,11 +249,11 @@ export function PodcastPlayer({
   };
 
   const skipAhead = () => {
-    seekTo(Math.min((status.currentTime || 0) + 30, duration || Number.MAX_SAFE_INTEGER));
+    seekTo(Math.min((status.currentTime || 0) + 30, duration || Number.MAX_SAFE_INTEGER), 'forward');
   };
 
   const skipBack = () => {
-    seekTo(Math.max((status.currentTime || 0) - 15, 0));
+    seekTo(Math.max((status.currentTime || 0) - 15, 0), 'backward');
   };
 
   const undoSkip = () => {

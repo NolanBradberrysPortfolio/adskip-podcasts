@@ -34,15 +34,15 @@ test('Pod Save America public transcripts return expected ad breaks', async () =
   const sedaris = findEpisode(feed.episodes, 'David Sedaris is Mostly Bark, Some Bite');
 
   await expectAnalysisRanges(cageMatch, [
-    [0, 70],
-    [1100, 1270],
-    [2475, 2635],
-    [4055, 4110],
+    [0, 90.5],
+    [1106, 1264.7],
+    [2482, 2626.7],
+    [4065, 4100.9],
   ]);
   await expectAnalysisRanges(sedaris, [
-    [945, 1125],
-    [2085, 2195],
-    [2915, 3030],
+    [950, 1120],
+    [2089.5, 2189.2],
+    [2920.4, 3022.5],
   ]);
 });
 
@@ -52,11 +52,13 @@ async function expectAnalysisRanges(episode: FeedEpisode, expectedRanges: Array<
   expect(analysis.engine).toBe('public-transcript');
   expect(analysis.segments).toHaveLength(expectedRanges.length);
 
-  expectedRanges.forEach(([minStart, maxEnd], index) => {
+  expectedRanges.forEach(([expectedStart, expectedEnd], index) => {
     const segment = analysis.segments[index];
     expect(segment.source).toBe('public-transcript');
-    expect(segment.start).toBeGreaterThanOrEqual(minStart - 2);
-    expect(segment.end).toBeLessThanOrEqual(maxEnd + 2);
+    expect(segment.start).toBeGreaterThanOrEqual(expectedStart - 3);
+    expect(segment.start).toBeLessThanOrEqual(expectedStart + 3);
+    expect(segment.end).toBeGreaterThanOrEqual(expectedEnd - 3);
+    expect(segment.end).toBeLessThanOrEqual(expectedEnd + 3);
   });
 }
 

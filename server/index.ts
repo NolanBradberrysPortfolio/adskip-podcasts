@@ -1850,7 +1850,7 @@ function detectAdsFromPublicTranscript(episodeId: string, transcript: Transcript
     const elapsed = line.end - active.start;
 
     if (returnCue && elapsed >= 18) {
-      active.end = score > 0 || callToAction ? line.end : line.start;
+      active.end = score > 0 || callToAction || hasSponsorCopyBeforeReturnCue(text) ? line.end : line.start;
       if (active.end - active.start >= 12) {
         segments.push(toAdSegment(episodeId, segments.length, active, 'public-transcript'));
       }
@@ -1916,6 +1916,12 @@ function isAdCallToActionCue(text: string): boolean {
 
 function isPublicTranscriptReturnCue(text: string): boolean {
   return /welcome to pod save america|back to (?:the )?(?:show|episode|conversation)|and we'?re back|now back to|let'?s get back/i.test(text);
+}
+
+function hasSponsorCopyBeforeReturnCue(text: string): boolean {
+  const match = text.match(/welcome to pod save america|back to (?:the )?(?:show|episode|conversation)|and we'?re back|now back to|let'?s get back/i);
+  const beforeReturnCue = match?.index === undefined ? '' : text.slice(0, match.index).trim();
+  return beforeReturnCue.length >= 6;
 }
 
 function isLikelyEditorialResume(text: string): boolean {

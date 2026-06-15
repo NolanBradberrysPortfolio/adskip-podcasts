@@ -729,8 +729,8 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={styles.screen}>
         <StatusBar style="dark" />
-        <View {...appContentWebProps(modalOpen)} testID="app-content">
-          <ScrollView ref={scrollRef} contentContainerStyle={styles.scrollContent}>
+        <View {...appContentWebProps(modalOpen)} style={styles.appContent} testID="app-content">
+          <ScrollView ref={scrollRef} contentContainerStyle={styles.scrollContent} style={styles.appScroll}>
           <View style={styles.header}>
             <View style={styles.brandLockup}>
               <View style={styles.logoMark}>
@@ -1096,6 +1096,14 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: '#F6F3ED',
+  },
+  appContent: {
+    flex: 1,
+    width: '100%',
+  },
+  appScroll: {
+    flex: 1,
+    width: '100%',
   },
   scrollContent: {
     width: '100%',

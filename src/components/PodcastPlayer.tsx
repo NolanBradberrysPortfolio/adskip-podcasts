@@ -78,7 +78,7 @@ export function PodcastPlayer({
   const [timelineFocused, setTimelineFocused] = useState(false);
   const [preparingPlayback, setPreparingPlayback] = useState(false);
   const lastSkipped = useRef<AdSegment | null>(null);
-  const skippedIds = useRef(new Set<string>());
+  const suppressedSegmentId = useRef<string | null>(null);
 
   const source = useMemo(() => {
     if (!episode?.audioUrl) {
@@ -109,7 +109,7 @@ export function PodcastPlayer({
   }, []);
 
   useEffect(() => {
-    skippedIds.current = new Set();
+    suppressedSegmentId.current = null;
     lastSkipped.current = null;
     setPreparingPlayback(false);
   }, [episode?.id]);
@@ -118,37 +118,65 @@ export function PodcastPlayer({
     player.playbackRate = rate;
   }, [player, rate]);
 
-  useEffect(() => {
-    if (!effectiveAutoSkip || !episode || !status.playing) {
-      return;
-    }
-
-    const current = status.currentTime;
-    const segment = segments.find(
-      (candidate) =>
-        candidate.confidence >= 0.55 &&
-        current >= candidate.start &&
-        current < candidate.end &&
-        !skippedIds.current.has(candidate.id),
-    );
-
-    if (!segment) {
-      return;
-    }
-
-    skippedIds.current.add(segment.id);
-    lastSkipped.current = segment;
-    player.seekTo(segment.end + 0.2).catch(() => undefined);
-  }, [effectiveAutoSkip, episode, player, segments, status.currentTime, status.playing]);
-
   const duration = status.duration || episode?.duration || 0;
   const progress = duration ? clamp(status.currentTime / duration, 0, 1) : 0;
   const timelineValue = status.currentTime || 0;
   const timelineMaximum = Math.max(duration, 1);
   const timelineText = `${formatDuration(timelineValue)} of ${formatDuration(duration)}`;
 
+  const findSkippableSegment = (value: number) =>
+    segments.find(
+      (candidate) =>
+        candidate.confidence >= 0.55 &&
+        value >= candidate.start &&
+        value < candidate.end &&
+        candidate.id !== suppressedSegmentId.current,
+    );
+
+  const seekPastSegment = (segment: AdSegment) => {
+    lastSkipped.current = segment;
+    const target = duration > 0 ? Math.min(segment.end + 0.2, timelineMaximum) : segment.end + 0.2;
+    player.seekTo(target).catch(() => undefined);
+  };
+
+  useEffect(() => {
+    const suppressed = suppressedSegmentId.current;
+    if (!suppressed) {
+      return;
+    }
+
+    const current = status.currentTime;
+    const stillInsideSuppressedSegment = segments.some(
+      (segment) => segment.id === suppressed && current >= segment.start && current < segment.end,
+    );
+
+    if (!stillInsideSuppressedSegment) {
+      suppressedSegmentId.current = null;
+    }
+  }, [segments, status.currentTime]);
+
+  useEffect(() => {
+    if (!effectiveAutoSkip || !episode || !status.playing) {
+      return;
+    }
+
+    const segment = findSkippableSegment(status.currentTime);
+
+    if (segment) {
+      seekPastSegment(segment);
+    }
+  }, [effectiveAutoSkip, episode, player, segments, status.currentTime, status.playing]);
+
   const seekTo = (value: number) => {
-    player.seekTo(clamp(value, 0, timelineMaximum)).catch(() => undefined);
+    const nextValue = clamp(value, 0, timelineMaximum);
+    const segment = effectiveAutoSkip ? findSkippableSegment(nextValue) : undefined;
+
+    if (segment) {
+      seekPastSegment(segment);
+      return;
+    }
+
+    player.seekTo(nextValue).catch(() => undefined);
   };
 
   const handleTimelineKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -210,11 +238,11 @@ export function PodcastPlayer({
   };
 
   const skipAhead = () => {
-    player.seekTo(Math.min((status.currentTime || 0) + 30, duration || Number.MAX_SAFE_INTEGER)).catch(() => undefined);
+    seekTo(Math.min((status.currentTime || 0) + 30, duration || Number.MAX_SAFE_INTEGER));
   };
 
   const skipBack = () => {
-    player.seekTo(Math.max((status.currentTime || 0) - 15, 0)).catch(() => undefined);
+    seekTo(Math.max((status.currentTime || 0) - 15, 0));
   };
 
   const undoSkip = () => {
@@ -223,6 +251,7 @@ export function PodcastPlayer({
     }
 
     const segment = lastSkipped.current;
+    suppressedSegmentId.current = segment.id;
     player.seekTo(Math.max(segment.start, 0)).catch(() => undefined);
     onUndoSkip();
   };

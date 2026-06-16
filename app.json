@@ -9,14 +9,19 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.skipcast.app",
+      "bundleIdentifier": "com.nolanbradberry.skipcast",
       "buildNumber": "1",
       "config": {
         "usesNonExemptEncryption": false
+      },
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
       }
     },
     "android": {
-      "package": "com.skipcast.app",
+      "package": "com.nolanbradberry.skipcast",
       "versionCode": 1,
       "permissions": [
         "android.permission.MODIFY_AUDIO_SETTINGS",

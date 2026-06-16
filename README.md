@@ -31,8 +31,58 @@ $env:EXPO_PUBLIC_API_URL="http://192.168.1.25:4300"; npm run android
 - `npm run ios` starts Expo for the iOS simulator on macOS. On Windows, use Expo Go QR scanning or an EAS development build on a physical iPhone.
 - `npm run android` starts Expo for Android.
 - `npm run server:start` starts only the RSS/analyzer API.
+- `npm run native:check` validates Expo/EAS iOS and Android release config.
+- `npm run build:android:emulator` starts an EAS Android APK build for emulator/device testing.
+- `npm run build:android:play` starts an EAS Android App Bundle build for Google Play.
+- `npm run build:ios:simulator` starts an EAS iOS Simulator build.
+- `npm run build:ios:appstore` starts an EAS iOS App Store/TestFlight build.
+- `npm run submit:android` submits the latest production Android build to Google Play.
+- `npm run submit:ios` submits the latest production iOS build to App Store Connect.
 - `npm run test:phone-pages` checks the live phone web playback flow.
 - `npm run test:import-phone-pages` checks live phone web OPML and Spotify-matching import flows.
+
+## Native App Builds
+
+SkipCast is configured as an Expo managed app for iOS and Android. The native app IDs are:
+
+```text
+iOS bundle ID: com.nolanbradberry.skipcast
+Android package: com.nolanbradberry.skipcast
+```
+
+Run the native release checks before building:
+
+```bash
+npm run native:check
+npx tsc --noEmit
+```
+
+Android can be tested from this Windows machine when Android Studio, the Android SDK, and an emulator are installed:
+
+```powershell
+$env:EXPO_PUBLIC_API_URL="https://notify-warm-dining-fields.trycloudflare.com"
+npm run android:device
+```
+
+For cloud builds through EAS:
+
+```bash
+npx eas-cli@latest login
+npx eas-cli@latest init
+npm run build:android:emulator
+npm run build:android:play
+npm run build:ios:simulator
+npm run build:ios:appstore
+```
+
+iOS and Android cloud builds can also be started from GitHub Actions with the `Native Builds` workflow. Link the project with EAS once, commit the generated `extra.eas.projectId` in `app.json`, add an `EXPO_TOKEN` repository secret, then run the workflow with:
+
+- `platform=android`, `profile=android-emulator` for an Android test APK.
+- `platform=android`, `profile=production` for a Google Play AAB.
+- `platform=ios`, `profile=ios-simulator` for an iOS Simulator build.
+- `platform=ios`, `profile=production` for an App Store/TestFlight build.
+
+iOS Simulator testing requires macOS with Xcode, or an EAS iOS simulator build downloaded onto a Mac. App Store and Google Play submission require Apple Developer and Google Play Console accounts plus signing credentials configured in EAS. The current native profiles point at the temporary local Cloudflare tunnel so phone tests can reach this Codex backend; replace `EXPO_PUBLIC_API_URL` in `eas.json` with a permanent HTTPS API before store review.
 
 ## Importing Podcasts
 

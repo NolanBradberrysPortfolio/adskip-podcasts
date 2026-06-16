@@ -1,0 +1,87 @@
+name: Native Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Native platform to build
+        required: true
+        type: choice
+        default: android
+        options:
+          - android
+          - ios
+      profile:
+        description: EAS build profile
+        required: true
+        type: choice
+        default: android-emulator
+        options:
+          - android-emulator
+          - ios-simulator
+          - preview
+          - production
+
+jobs:
+  validate:
+    name: Validate native config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript
+        run: npx tsc --noEmit
+
+      - name: Native config
+        run: npm run native:check
+
+  eas-build:
+    name: Start EAS build
+    needs: validate
+    runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    steps:
+      - name: Check EXPO_TOKEN
+        if: ${{ env.EXPO_TOKEN == '' }}
+        run: |
+          echo "Add an EXPO_TOKEN repository secret before running native EAS builds."
+          exit 1
+
+      - name: Check profile/platform pairing
+        run: |
+          PLATFORM="${{ inputs.platform }}"
+          PROFILE="${{ inputs.profile }}"
+          if [ "$PLATFORM" = "android" ] && [ "$PROFILE" = "ios-simulator" ]; then
+            echo "ios-simulator can only be used with platform=ios."
+            exit 1
+          fi
+          if [ "$PLATFORM" = "ios" ] && [ "$PROFILE" = "android-emulator" ]; then
+            echo "android-emulator can only be used with platform=android."
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start native build
+        run: npx eas-cli@latest build --non-interactive --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}"

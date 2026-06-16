@@ -8,19 +8,37 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://globe-header-entrance-friendly.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://notify-warm-dining-fields.trycloudflare.com"
+      }
+    },
+    "android-emulator": {
+      "extends": "development",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "ios-simulator": {
+      "extends": "development",
+      "ios": {
+        "simulator": true
       }
     },
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://globe-header-entrance-friendly.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://notify-warm-dining-fields.trycloudflare.com"
+      },
+      "android": {
+        "buildType": "apk"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://globe-header-entrance-friendly.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://notify-warm-dining-fields.trycloudflare.com"
+      },
+      "android": {
+        "buildType": "app-bundle"
       }
     }
   },
